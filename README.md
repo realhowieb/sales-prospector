@@ -15,12 +15,35 @@ Switch between the two with the **"I am a…"** toggle at the top of the sidebar
 what they need + where they are, and sort by Best match / Best deal / Top rated / Fastest
 response. Reps can **list themselves** via the in-app form.
 
-> **Marketplace persistence (important):** the marketplace ships with a seeded roster so it's
-> populated on day one. Listings a rep adds via the form are stored in **that browser session
-> only** — they are *not* yet visible to other visitors. Making the open marketplace truly
-> shared requires a **shared datastore** (there's no free public source for reps like there is
-> for businesses). Next step: wire listings + intro-requests to **Google Sheets** (service
-> account) or **Supabase** (Postgres) — one secret, added per the three-secret-stores pattern.
+### Making it a real, shared open marketplace (Supabase)
+The marketplace works in two modes automatically:
+
+- **Demo mode** (no secret): a seeded roster + this-browser listings. Good for local dev / a demo.
+- **🟢 Live mode** (Supabase secret present): reps self-register into a shared Postgres table and
+  **every visitor sees the same listings** — a true open marketplace.
+
+The app reads/writes Supabase over its REST API using `requests` (no extra dependency). To turn
+it on:
+
+1. Create a free project at [supabase.com](https://supabase.com).
+2. **SQL Editor → run [`supabase_setup.sql`](supabase_setup.sql)** — creates the `reps` table and
+   RLS policies allowing public read + insert (no update/delete).
+3. **Project Settings → API** → copy the **Project URL** and the **anon public key**.
+4. Add them as secrets (they're safe with the RLS above):
+   - **Streamlit Cloud:** app → Settings → Secrets → paste the `[supabase]` block.
+   - **Local:** copy [`.streamlit/secrets.toml.example`](.streamlit/secrets.toml.example) to
+     `.streamlit/secrets.toml` and fill in the values (this file is gitignored).
+   ```toml
+   [supabase]
+   url = "https://YOUR-PROJECT-REF.supabase.co"
+   key = "YOUR-ANON-PUBLIC-KEY"
+   ```
+5. Reload. The Customer tab now shows **🟢 Live marketplace**. Empty at first — use **Load 16
+   sample reps** once to populate, or let real reps register via **List yourself as a rep**.
+
+**Moderation:** anyone can insert (that's what "open" means). Flip `verified` to true or delete
+spam from the Supabase Table Editor. Intro requests are currently session-only — persisting and
+notifying reps is a natural next step (add an `intro_requests` table + email).
 
 ## Rep side — what it does
 - Search any US metro (presets) or type any city (geocoded via OSM Nominatim).

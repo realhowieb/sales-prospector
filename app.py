@@ -295,8 +295,73 @@ REPS_SEED: list[dict] = [
 ]
 
 
+# ---- Shared marketplace store (Supabase — optional) ----------------------- #
+# When Supabase secrets are present the marketplace becomes a real, shared,
+# open marketplace: reps self-register into a Postgres table via the Supabase
+# REST API and every visitor sees them. Without secrets the app runs in demo
+# mode (seed roster + this-browser-session listings) so it still works locally.
+def _supabase_cfg():
+    try:
+        cfg = st.secrets["supabase"]
+        url, key = cfg["url"], cfg["key"]
+        if url and key:
+            return url.rstrip("/"), key
+    except Exception:
+        pass
+    return None, None
+
+
+SUPABASE_URL, SUPABASE_KEY = _supabase_cfg()
+SUPABASE_ON = bool(SUPABASE_URL and SUPABASE_KEY)
+REP_FIELDS = ["name", "company", "categories", "metros", "deal", "deal_strength",
+              "rating", "reviews", "response", "verified", "blurb", "email", "phone"]
+
+
+def _sb_headers(extra: dict | None = None) -> dict:
+    h = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
+         "Content-Type": "application/json"}
+    if extra:
+        h.update(extra)
+    return h
+
+
+@st.cache_data(ttl=45, show_spinner=False)
+def fetch_reps_db() -> list[dict]:
+    """Read every listing from the shared Supabase table."""
+    r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/reps", headers=_sb_headers(),
+        params={"select": "*", "order": "created_at.desc"}, timeout=20,
+    )
+    r.raise_for_status()
+    rows = r.json()
+    for row in rows:
+        row["id"] = f"db-{row.get('id')}"
+        row["categories"] = row.get("categories") or []
+        row["metros"] = row.get("metros") or []
+        row["rating"] = row.get("rating") or 0.0
+        row["reviews"] = row.get("reviews") or 0
+    return rows
+
+
+def insert_reps_db(reps: list[dict]):
+    """Insert one or more listings into the shared table, then bust the cache."""
+    payload = [{k: rep.get(k) for k in REP_FIELDS} for rep in reps]
+    r = requests.post(
+        f"{SUPABASE_URL}/rest/v1/reps",
+        headers=_sb_headers({"Prefer": "return=minimal"}), json=payload, timeout=20,
+    )
+    r.raise_for_status()
+    fetch_reps_db.clear()
+
+
 def all_reps() -> list[dict]:
-    """Seed roster plus any reps added in this browser session."""
+    """Live shared marketplace from Supabase when configured; else demo (seed + session)."""
+    if SUPABASE_ON:
+        try:
+            return fetch_reps_db()
+        except Exception as exc:
+            st.warning(f"Marketplace database unreachable ({exc}). Showing sample reps for now.")
+            return REPS_SEED
     return REPS_SEED + st.session_state.setdefault("my_reps", [])
 
 
@@ -435,8 +500,9 @@ def rep_card(rep: dict, score: int):
 
 
 def render_marketplace():
+    roster = all_reps()
     matched = []
-    for rep in all_reps():
+    for rep in roster:
         if cust_category != "Any category" and cust_category not in rep["categories"]:
             continue
         if cust_metro != "Anywhere" and cust_metro not in rep["metros"]:
@@ -456,7 +522,21 @@ def render_marketplace():
 
     want = "any service" if cust_category == "Any category" else cust_category
     where = "any area" if cust_metro == "Anywhere" else cust_metro
+    st.caption("🟢 Live marketplace — reps below are real listings from the shared database."
+               if SUPABASE_ON else
+               "🟡 Demo mode — sample reps + this-browser listings. Connect Supabase to go live (see README).")
     st.subheader(f"{len(matched)} reps competing for your business · {want} · {where}")
+
+    if SUPABASE_ON and not roster:
+        st.info("The live marketplace has no reps yet. Be the first to list yourself below — "
+                "or load a sample roster to explore the experience.")
+        if st.button("Load 16 sample reps into the marketplace"):
+            try:
+                insert_reps_db(REPS_SEED)
+                st.success("Sample roster loaded into the shared marketplace.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Couldn't load samples: {exc}")
 
     if not matched:
         st.info("No reps match yet. Try **Any category** / **Anywhere**, or lower the minimum rating.")
@@ -490,20 +570,29 @@ def render_marketplace():
             if not (f_name and f_company and f_cats and f_metros and f_deal):
                 st.error("Please fill name, company, at least one category & territory, and your deal.")
             else:
-                mine = st.session_state.setdefault("my_reps", [])
-                mine.append({
-                    "id": f"me-{len(mine) + 1}", "name": f_name, "company": f_company,
-                    "categories": f_cats, "metros": f_metros, "deal": f_deal,
-                    "deal_strength": f_strength, "rating": 0.0, "reviews": 0,
-                    "response": f_resp, "verified": False, "blurb": "New rep listing.",
-                    "email": f_email or "—", "phone": f_phone or "—",
-                })
-                st.success(f"You're listed! Customers searching {', '.join(f_cats)} can now find {f_company}.")
-                st.rerun()
+                new_rep = {
+                    "name": f_name, "company": f_company, "categories": f_cats,
+                    "metros": f_metros, "deal": f_deal, "deal_strength": f_strength,
+                    "rating": 0.0, "reviews": 0, "response": f_resp, "verified": False,
+                    "blurb": "New rep listing.", "email": f_email or "—", "phone": f_phone or "—",
+                }
+                if SUPABASE_ON:
+                    try:
+                        insert_reps_db([new_rep])
+                        st.success(f"You're listed! {f_company} is now in the live marketplace for every visitor.")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Couldn't save your listing: {exc}")
+                else:
+                    mine = st.session_state.setdefault("my_reps", [])
+                    new_rep["id"] = f"me-{len(mine) + 1}"
+                    mine.append(new_rep)
+                    st.success(f"You're listed (demo/session only). Connect Supabase to make {f_company} visible to everyone.")
+                    st.rerun()
         st.caption(
-            "Listings added here are visible in **this browser session** only. To make the "
-            "marketplace shared across all visitors, connect a datastore (Google Sheets or "
-            "Supabase) — see the README."
+            "🟢 Live: new listings save to the shared database and appear for every visitor."
+            if SUPABASE_ON else
+            "🟡 Demo: listings live in this browser session only. Add Supabase secrets to go live (see README)."
         )
 
     reqs = st.session_state.get("intro_requests", [])
