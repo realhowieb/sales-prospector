@@ -355,8 +355,9 @@ def _sb_check(r):
     if r.status_code >= 400:
         hint = ""
         if r.status_code == 404:
-            hint = (" — the 'reps' table wasn't found. Run supabase_setup.sql in your "
-                    "Supabase SQL Editor, and double-check the `url` secret is the Project URL.")
+            hint = (" — that table wasn't found in your Supabase project. Re-run the latest "
+                    "supabase_setup.sql (it creates BOTH the `reps` and `leads` tables), then "
+                    "retry. Also confirm the `url` secret is your Project URL.")
         elif r.status_code in (401, 403):
             hint = (" — check the anon key, and that the RLS read/insert policies from "
                     "supabase_setup.sql exist on the table.")
