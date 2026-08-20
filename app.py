@@ -8,12 +8,13 @@ Pipeline stages & notes live in the browser session; export/import as CSV to kee
 from __future__ import annotations
 
 import hashlib
+import html
 import io
 import re
 import secrets
 import smtplib
 import time
-from datetime import datetime
+from datetime import date, datetime
 from email.message import EmailMessage
 
 import pandas as pd
@@ -88,6 +89,44 @@ STAGES = ["— none —", "New lead", "Contacted", "Qualified", "Won", "Passed"]
 STAGE_COLORS = {
     "New lead": "#8A9993", "Contacted": "#2E6C8C", "Qualified": "#B67A1E",
     "Won": "#3E7C64", "Passed": "#C6432A",
+}
+
+PRODUCT_PROFILES: dict[str, dict] = {
+    "Marketing/Web": {
+        "weights": {"phone": 35, "no_website": 35, "address": 15, "independent": 15},
+        "fit_categories": set(CATEGORIES),
+        "angle": "presence gap and direct-response conversation",
+    },
+    "Security/ADT": {
+        "weights": {"phone": 30, "no_website": 5, "address": 30, "independent": 25},
+        "fit_categories": {"Restaurant & Café", "Retail Boutique", "Beauty & Spa", "Auto Services", "Fitness & Gym"},
+        "fit_bonus": 10,
+        "angle": "in-person security/CCTV conversation",
+    },
+    "POS": {
+        "weights": {"phone": 25, "no_website": 10, "address": 25, "independent": 25},
+        "fit_categories": {"Restaurant & Café", "Retail Boutique", "Beauty & Spa", "Auto Services"},
+        "fit_bonus": 15,
+        "angle": "checkout, payments, and hardware conversation",
+    },
+    "Payroll/HR": {
+        "weights": {"phone": 30, "no_website": 5, "address": 10, "independent": 20},
+        "fit_categories": {"Medical & Dental", "Professional Svcs", "Fitness & Gym", "Restaurant & Café"},
+        "fit_bonus": 20,
+        "angle": "small-team payroll and HR compliance conversation",
+    },
+    "Insurance": {
+        "weights": {"phone": 25, "no_website": 5, "address": 20, "independent": 20},
+        "fit_categories": {"Auto Services", "Home Services", "Professional Svcs", "Medical & Dental"},
+        "fit_bonus": 15,
+        "angle": "commercial coverage and risk review",
+    },
+    "Merchant Services": {
+        "weights": {"phone": 30, "no_website": 10, "address": 20, "independent": 25},
+        "fit_categories": {"Restaurant & Café", "Retail Boutique", "Beauty & Spa", "Fitness & Gym"},
+        "fit_bonus": 15,
+        "angle": "payment processing and fee-savings conversation",
+    },
 }
 
 OVERPASS_ENDPOINTS = [
@@ -173,7 +212,11 @@ def which_category(tags: dict) -> str | None:
     return None
 
 
-def lead_score(row: dict) -> tuple[int, list[str]]:
+def h(value) -> str:
+    return html.escape("" if value is None else str(value), quote=True)
+
+
+def lead_score(row: dict, profile_name: str = "Marketing/Web") -> tuple[int, list[str]]:
     """
     Transparent score from *real* listing signals a rep can act on:
       + reachable (has phone)            35
@@ -181,29 +224,64 @@ def lead_score(row: dict) -> tuple[int, list[str]]:
       + locatable for a visit (address)  15
       + independent (not a chain)        15
     """
+    profile = PRODUCT_PROFILES.get(profile_name, PRODUCT_PROFILES["Marketing/Web"])
+    weights = profile["weights"]
     score, why = 0, []
     if row["phone"]:
-        score += 35; why.append("Has phone (reachable) +35")
+        points = weights["phone"]
+        score += points; why.append(f"Has phone (reachable) +{points}")
     else:
         why.append("No phone listed")
     if not row["website"]:
-        score += 35; why.append("No website — presence gap +35")
+        points = weights["no_website"]
+        score += points; why.append(f"No website +{points}")
     else:
         why.append("Already has a website")
     if row["address"]:
-        score += 15; why.append("Street address (visitable) +15")
+        points = weights["address"]
+        score += points; why.append(f"Street address (visitable) +{points}")
     if row["independent"]:
-        score += 15; why.append("Independent, not a chain +15")
+        points = weights["independent"]
+        score += points; why.append(f"Independent, not a chain +{points}")
     else:
         why.append("Looks like a chain/brand")
+    if row["category"] in profile.get("fit_categories", set()):
+        points = profile.get("fit_bonus", 0)
+        if points:
+            score += points; why.append(f"Good category fit for {profile_name} +{points}")
     return min(score, 100), why
+
+
+def sales_insight(row: dict, profile_name: str = "Marketing/Web") -> str:
+    profile = PRODUCT_PROFILES.get(profile_name, PRODUCT_PROFILES["Marketing/Web"])
+    ownership = "local independent" if row["independent"] else "known brand or chain"
+    access = "direct phone access" if row["phone"] else "no listed phone"
+    place = "a physical storefront" if row["address"] else "limited address detail"
+    website = "no visible website" if not row["website"] else "an existing website"
+    return (
+        f"Recommended approach: {ownership} {row['category'].lower()} with {access}, "
+        f"{place}, and {website}. Good candidate for a {profile['angle']}."
+    )
+
+
+def score_prospects(df: pd.DataFrame, profile_name: str) -> pd.DataFrame:
+    if df.empty:
+        return df
+    scored = df.copy()
+    for idx, row in scored.iterrows():
+        score, why = lead_score(row, profile_name)
+        scored.at[idx, "score"] = score
+        scored.at[idx, "heat"] = heat_of(score)
+        scored.at[idx, "why"] = " · ".join(why)
+        scored.at[idx, "insight"] = sales_insight(row, profile_name)
+    return scored.sort_values("score", ascending=False).reset_index(drop=True)
 
 
 def heat_of(score: int) -> str:
     return "Hot" if score >= 66 else "Warm" if score >= 40 else "Cool"
 
 
-def parse_elements(elements: list[dict]) -> pd.DataFrame:
+def parse_elements(elements: list[dict], profile_name: str = "Marketing/Web") -> pd.DataFrame:
     rows = []
     for el in elements:
         tags = el.get("tags", {})
@@ -234,10 +312,11 @@ def parse_elements(elements: list[dict]) -> pd.DataFrame:
             "cuisine": tags.get("cuisine", ""),
             "independent": independent,
         }
-        score, why = lead_score(row)
+        score, why = lead_score(row, profile_name)
         row["score"] = score
         row["heat"] = heat_of(score)
         row["why"] = " · ".join(why)
+        row["insight"] = sales_insight(row, profile_name)
         rows.append(row)
     df = pd.DataFrame(rows)
     if not df.empty:
@@ -270,6 +349,16 @@ def set_note(bid: str, note: str, name: str, cat: str):
     entry["note"] = note
 
 
+def set_follow_up(bid: str, next_follow_up: str, name: str, cat: str):
+    p = pipe()
+    entry = p.setdefault(bid, {"name": name, "category": cat, "stage": "New lead"})
+    entry["next_follow_up"] = next_follow_up
+
+
+def normalize_owner_email(email: str) -> str:
+    return (email or "").strip().lower()
+
+
 # --------------------------------------------------------------------------- #
 # Rep marketplace (customer side)
 # --------------------------------------------------------------------------- #
@@ -299,6 +388,9 @@ REPS_SEED: list[dict] = [
     {"id": "r16", "name": "Fatima Yusuf", "company": "Vantage Financial Advisors", "categories": ["Professional Svcs"], "metros": ["Seattle, WA", "Portland, OR", "Phoenix, AZ", "Bay Area, CA"], "deal": "Free consult + reduced first-year fee", "deal_strength": 0.65, "rating": 5.0, "reviews": 134, "response": "< 1 hour", "verified": True, "blurb": "Bookkeeping, tax & advisory for small business.", "email": "fatima@vantageadvisors.com", "phone": "(206) 555-0359"},
 ]
 
+for _rep in REPS_SEED:
+    _rep["is_sample"] = True
+
 
 # ---- Shared marketplace store (Supabase — optional) ----------------------- #
 # When Supabase secrets are present the marketplace becomes a real, shared,
@@ -324,11 +416,9 @@ except Exception:
     SUPABASE_SERVICE_KEY = None
 REP_FIELDS = ["name", "company", "categories", "metros", "deal", "deal_strength",
               "rating", "reviews", "response", "verified", "blurb", "email", "phone",
-              "edit_code_hash", "active"]
+              "edit_code_hash", "active", "is_sample"]
 LEAD_FIELDS = ["rep_id", "rep_company", "rep_email", "customer_name",
                "customer_email", "customer_phone", "message", "category", "metro"]
-
-
 def _email_cfg():
     """Resend-over-SMTP config from secrets. Only `password` (Resend key) + `from` required."""
     try:
@@ -383,6 +473,7 @@ def fetch_reps_db() -> list[dict]:
         row["metros"] = row.get("metros") or []
         row["rating"] = row.get("rating") or 0.0
         row["reviews"] = row.get("reviews") or 0
+        row["is_sample"] = bool(row.get("is_sample", False))
     return rows
 
 
@@ -432,6 +523,44 @@ def fetch_leads_db(rep_email: str) -> list[dict]:
                              "order": "created_at.desc"}, timeout=20)
     _sb_check(r)
     return r.json()
+
+
+def fetch_pipeline_db(owner_email: str) -> list[dict]:
+    """Read a rep's private pipeline. Requires the service_role key."""
+    r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/pipeline_entries",
+        headers=_sb_service_headers(),
+        params={"select": "*", "owner_email": f"eq.{owner_email}", "order": "updated_at.desc"},
+        timeout=20,
+    )
+    _sb_check(r)
+    return r.json()
+
+
+def save_pipeline_db(owner_email: str, entries: dict):
+    """Upsert pipeline rows for one rep. Requires a unique(owner_email, prospect_id) index."""
+    payload = []
+    for prospect_id, entry in entries.items():
+        payload.append({
+            "owner_email": owner_email,
+            "prospect_id": str(prospect_id),
+            "name": entry.get("name", ""),
+            "category": entry.get("category", ""),
+            "stage": entry.get("stage", "New lead"),
+            "note": entry.get("note", ""),
+            "next_follow_up": entry.get("next_follow_up") or None,
+            "outcome": entry.get("outcome", ""),
+        })
+    if not payload:
+        return
+    r = requests.post(
+        f"{SUPABASE_URL}/rest/v1/pipeline_entries",
+        headers=_sb_service_headers({"Prefer": "resolution=merge-duplicates,return=minimal"}),
+        params={"on_conflict": "owner_email,prospect_id"},
+        json=payload,
+        timeout=20,
+    )
+    _sb_check(r)
 
 
 def send_lead_email(rep: dict, lead: dict) -> bool:
@@ -688,6 +817,12 @@ with st.sidebar:
     st.divider()
     if rep_mode:
         st.header("Search a territory")
+        product_profile = st.selectbox(
+            "What do you sell?",
+            list(PRODUCT_PROFILES.keys()),
+            index=0,
+            help="Changes lead-score weights and the recommended sales approach.",
+        )
         metro = st.selectbox("Metro area", list(METROS.keys()), index=0)
         custom = st.text_input("…or type any city / area", placeholder="e.g. Boise, ID", help="Uses OpenStreetMap geocoding.")
         cats = st.multiselect(
@@ -703,6 +838,15 @@ with st.sidebar:
         indie_only = st.toggle("Independents only (hide chains)", value=False)
         heat_filter = st.multiselect("Lead heat", ["Hot", "Warm", "Cool"], default=[])
         sort_by = st.selectbox("Sort by", ["Lead score", "Name (A–Z)", "Category"])
+        st.divider()
+        st.subheader("Pipeline sync")
+        pipeline_owner_email = st.text_input(
+            "Rep email",
+            value=st.session_state.get("pipeline_owner_email", ""),
+            placeholder="you@company.com",
+            help="Used to load/save your private Supabase pipeline when service_role is configured.",
+        )
+        st.session_state["pipeline_owner_email"] = pipeline_owner_email
     else:
         st.header("What do you need?")
         cust_category = st.selectbox("I'm looking for", ["Any category"] + list(CATEGORIES.keys()))
@@ -716,8 +860,8 @@ with st.sidebar:
 def rep_card(rep: dict, score: int, rating: float, rcount: int, real: bool, recent: list):
     n = round(rating)
     stars = "★" * n + "☆" * (5 - n)
-    cats_html = " · ".join(rep["categories"])
-    metros_html = ", ".join(rep["metros"])
+    cats_html = " · ".join(h(c) for c in rep["categories"])
+    metros_html = ", ".join(h(m) for m in rep["metros"])
     is_new = rcount == 0
     rating_txt = "Unrated" if is_new else f'{rating:.1f} ({rcount})'
     with st.container():
@@ -727,17 +871,19 @@ def rep_card(rep: dict, score: int, rating: float, rcount: int, real: bool, rece
             badges = ""
             if rep.get("verified"):
                 badges += '<span class="badge b-verified">✓ Verified</span>'
+            if rep.get("is_sample"):
+                badges += '<span class="badge">Sample listing</span>'
             if is_new:
                 badges += '<span class="badge b-new">New listing</span>'
             st.markdown(
-                f'<div class="repname">{rep["company"]}</div>'
-                f'<div class="repco">{rep["name"]} · {cats_html}</div>'
+                f'<div class="repname">{h(rep["company"])}</div>'
+                f'<div class="repco">{h(rep["name"])} · {cats_html}</div>'
                 f'{badges}'
                 f'<span class="badge">📍 {metros_html}</span>'
                 f'<span class="badge"><span class="stars">{stars}</span> {rating_txt}</span>'
-                f'<span class="badge">⏱ {rep["response"]}</span>'
-                f'<div class="deal">🏷️ <b>Deal:</b> {rep["deal"]}</div>'
-                f'<div class="pmeta">{rep.get("blurb", "")}</div>',
+                f'<span class="badge">⏱ {h(rep["response"])}</span>'
+                f'<div class="deal">🏷️ <b>Deal:</b> {h(rep["deal"])}</div>'
+                f'<div class="pmeta">{h(rep.get("blurb", ""))}</div>',
                 unsafe_allow_html=True,
             )
             with st.expander("📨 Request an intro / claim this deal"):
@@ -761,8 +907,8 @@ def rep_card(rep: dict, score: int, rating: float, rcount: int, real: bool, rece
                         rn_ = int(rv.get("rating", 0) or 0)
                         st.markdown(
                             f'<span class="stars">{"★" * rn_}{"☆" * (5 - rn_)}</span> '
-                            f'**{rv.get("customer_name") or "Anonymous"}** — '
-                            f'{rv.get("comment") or ""}',
+                            f'**{h(rv.get("customer_name") or "Anonymous")}** — '
+                            f'{h(rv.get("comment") or "")}',
                             unsafe_allow_html=True,
                         )
                 elif not is_new:
@@ -816,7 +962,7 @@ def render_marketplace():
 
     want = "any service" if cust_category == "Any category" else cust_category
     where = "any area" if cust_metro == "Anywhere" else cust_metro
-    st.caption("🟢 Live marketplace — reps below are real listings from the shared database."
+    st.caption("🟢 Live marketplace — reps below are shared database listings. Sample listings are labeled."
                if SUPABASE_ON else
                "🟡 Demo mode — sample reps + this-browser listings. Connect Supabase to go live (see README).")
     st.subheader(f"{len(matched)} reps competing for your business · {want} · {where}")
@@ -886,7 +1032,7 @@ def render_marketplace():
                         "metros": f_metros, "deal": f_deal, "deal_strength": f_strength,
                         "rating": 0.0, "reviews": 0, "response": f_resp, "verified": False,
                         "blurb": f_blurb or "New rep listing.", "email": f_email, "phone": f_phone or "—",
-                        "active": True,
+                        "active": True, "is_sample": False,
                     }
                     if SUPABASE_ON:
                         new_rep["edit_code_hash"] = _hash_code(code)
@@ -1037,8 +1183,9 @@ if go:
             except Exception as exc:
                 st.error(f"Live data source unavailable right now: {exc}")
                 st.stop()
-        df = parse_elements(elements)
+        df = parse_elements(elements, product_profile)
         st.session_state["results"] = df
+        st.session_state["score_profile"] = product_profile
         st.session_state["area_label"] = area_label
         st.session_state["bbox"] = bbox
 
@@ -1057,17 +1204,18 @@ def prospect_card(r: pd.Series):
         with c1:
             heat_cls = {"Hot": "b-hot", "Warm": "b-warm", "Cool": "b-cool"}[r["heat"]]
             st.markdown(
-                f'<div class="pname">{r["name"]}</div>'
-                f'<div class="pmeta">{r["category"]}'
-                + (f' · {r["address"]}' if r["address"] else "")
+                f'<div class="pname">{h(r["name"])}</div>'
+                f'<div class="pmeta">{h(r["category"])}'
+                + (f' · {h(r["address"])}' if r["address"] else "")
                 + "</div>"
-                f'<span class="badge {heat_cls}">{r["heat"]} · {r["score"]}</span>'
-                + (f'<span class="badge">📞 {r["phone"]}</span>' if r["phone"] else '<span class="badge">No phone</span>')
+                f'<span class="badge {heat_cls}">{h(r["heat"])} · {int(r["score"])}</span>'
+                + (f'<span class="badge">📞 {h(r["phone"])}</span>' if r["phone"] else '<span class="badge">No phone</span>')
                 + ('<span class="badge b-gap">No website</span>' if not r["website"] else '<span class="badge">🌐 Website</span>')
                 + ('<span class="badge">Independent</span>' if r["independent"] else '<span class="badge">Chain</span>'),
                 unsafe_allow_html=True,
             )
             with st.expander("Why this score / details"):
+                st.write(r.get("insight", ""))
                 st.write(r["why"])
                 if r["website"]:
                     st.write(f"Website: {r['website']}")
@@ -1089,6 +1237,20 @@ def prospect_card(r: pd.Series):
             )
             if note != entry.get("note", ""):
                 set_note(bid, note, r["name"], r["category"])
+            follow_raw = entry.get("next_follow_up", "")
+            try:
+                follow_default = datetime.strptime(follow_raw, "%Y-%m-%d").date() if follow_raw else None
+            except ValueError:
+                follow_default = None
+            follow = st.date_input(
+                "Next follow-up",
+                value=follow_default,
+                key=f"follow_{bid}",
+                label_visibility="collapsed",
+            )
+            follow_value = follow.isoformat() if follow else ""
+            if follow_value != follow_raw:
+                set_follow_up(bid, follow_value, r["name"], r["category"])
         st.markdown("</div>", unsafe_allow_html=True)
 
 
@@ -1111,21 +1273,24 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
 
 with tab_discover:
     df = st.session_state.get("results")
+    if df is not None and st.session_state.get("score_profile") != product_profile:
+        df = score_prospects(df, product_profile)
+        st.session_state["results"] = df
+        st.session_state["score_profile"] = product_profile
     if df is None:
         st.info("👈 Pick a metro (or type any city), choose categories, and hit **Search territory** to pull live prospects.")
         st.markdown(
-            "**How lead scores work** — they reward the businesses easiest to *win*, from real listing signals:\n"
-            "- **Has a phone** → reachable (+35)\n"
-            "- **No website** → a presence gap you can help close (+35)\n"
-            "- **Street address** → you can plan a visit (+15)\n"
-            "- **Independent, not a chain** → a real local decision-maker (+15)"
+            "**How lead scores work** — choose what you sell, and the score adjusts around the signals that matter for that sale:\n"
+            "- **Marketing/Web** heavily rewards no website / presence gaps.\n"
+            "- **Security, POS, Merchant Services** care more about storefronts, phone access, and local operators.\n"
+            "- **Payroll/HR and Insurance** add more weight for categories that usually need operational or risk support."
         )
     elif df.empty:
         st.warning("No named businesses found for those categories in this area. Try more categories or a larger metro.")
     else:
         view = apply_filters(df)
         area_label = st.session_state.get("area_label", "")
-        st.subheader(f"{area_label} — {len(view)} prospects")
+        st.subheader(f"{area_label} — {len(view)} prospects for {product_profile}")
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Prospects shown", len(view))
         m2.metric("🔥 Hot leads", int((view["heat"] == "Hot").sum()))
@@ -1160,6 +1325,37 @@ with tab_discover:
 
 with tab_pipeline:
     p = pipe()
+    owner_email = normalize_owner_email(st.session_state.get("pipeline_owner_email", ""))
+    sync_ready = bool(SUPABASE_ON and SUPABASE_SERVICE_KEY and owner_email)
+    if SUPABASE_ON and SUPABASE_SERVICE_KEY:
+        s1, s2, s3 = st.columns([2, 1, 1])
+        s1.caption("Supabase pipeline sync is private to the rep email in the sidebar.")
+        if s2.button("Load pipeline", use_container_width=True, disabled=not owner_email):
+            try:
+                rows = fetch_pipeline_db(owner_email)
+                st.session_state["pipe"] = {
+                    str(r["prospect_id"]): {
+                        "name": r.get("name", ""),
+                        "category": r.get("category", ""),
+                        "stage": r.get("stage", "New lead"),
+                        "note": r.get("note", "") or "",
+                        "next_follow_up": r.get("next_follow_up") or "",
+                        "outcome": r.get("outcome", "") or "",
+                    }
+                    for r in rows
+                }
+                st.success(f"Loaded {len(rows)} pipeline rows.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Couldn't load pipeline: {exc}")
+        if s3.button("Save pipeline", use_container_width=True, disabled=not sync_ready or not p):
+            try:
+                save_pipeline_db(owner_email, p)
+                st.success("Pipeline saved.")
+            except Exception as exc:
+                st.error(f"Couldn't save pipeline: {exc}")
+    elif SUPABASE_ON:
+        st.caption("Pipeline sync needs `[supabase].service_key`; without it, this browser-session pipeline still works.")
     if not p:
         st.info("Move prospects into stages from the Discover tab and they'll collect here.")
     else:
@@ -1167,21 +1363,38 @@ with tab_pipeline:
         pdf = pd.DataFrame(prows)
         # Entries may carry only a stage or only a note, so guarantee every column
         # exists (and has no NaN) before we select/sort on them.
-        for _col in ["name", "category", "stage", "note"]:
+        for _col in ["name", "category", "stage", "note", "next_follow_up", "outcome"]:
             if _col not in pdf.columns:
                 pdf[_col] = ""
         pdf["stage"] = pdf["stage"].fillna("")
         pdf["note"] = pdf["note"].fillna("")
+        pdf["next_follow_up"] = pdf["next_follow_up"].fillna("")
+        today = date.today().isoformat()
+        due = pdf[pdf["next_follow_up"].astype(str) == today]
+        overdue = pdf[(pdf["next_follow_up"].astype(str) != "") & (pdf["next_follow_up"].astype(str) < today)]
         order = {s: i for i, s in enumerate(STAGES)}
         pdf["ord"] = pdf["stage"].map(lambda s: order.get(s, 99))
-        pdf = pdf.sort_values("ord").drop(columns="ord")
+        pdf = pdf.sort_values(["next_follow_up", "ord"], na_position="last").drop(columns="ord")
         st.subheader(f"{len(pdf)} businesses in your pipeline")
-        cols = st.columns(len(STAGE_COLORS))
-        for col, stage in zip(cols, STAGE_COLORS):
-            col.metric(stage, int((pdf["stage"] == stage).sum()))
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Today's Calls", len(due))
+        k2.metric("Overdue", len(overdue))
+        k3.metric("New Leads", int((pdf["stage"] == "New lead").sum()))
+        k4.metric("Qualified", int((pdf["stage"] == "Qualified").sum()))
+        if len(due) or len(overdue):
+            with st.expander("Today's call list", expanded=True):
+                call_list = pd.concat([overdue, due]).drop_duplicates(subset="id")
+                st.dataframe(
+                    call_list[["name", "category", "stage", "next_follow_up", "note"]].rename(
+                        columns={"name": "Business", "category": "Category", "stage": "Stage",
+                                 "next_follow_up": "Next Follow-up", "note": "Note"}
+                    ),
+                    use_container_width=True, hide_index=True,
+                )
         st.dataframe(
-            pdf[["name", "category", "stage", "note"]].rename(
-                columns={"name": "Business", "category": "Category", "stage": "Stage", "note": "Note"}
+            pdf[["name", "category", "stage", "next_follow_up", "note"]].rename(
+                columns={"name": "Business", "category": "Category", "stage": "Stage",
+                         "next_follow_up": "Next Follow-up", "note": "Note"}
             ),
             use_container_width=True, hide_index=True,
         )
@@ -1202,6 +1415,8 @@ with tab_pipeline:
                             "name": r.get("name", ""), "category": r.get("category", ""),
                             "stage": r.get("stage", "New lead"),
                             "note": "" if pd.isna(r.get("note", "")) else str(r.get("note", "")),
+                            "next_follow_up": "" if pd.isna(r.get("next_follow_up", "")) else str(r.get("next_follow_up", "")),
+                            "outcome": "" if pd.isna(r.get("outcome", "")) else str(r.get("outcome", "")),
                         }
                     st.success(f"Imported {len(imp)} rows.")
                     st.rerun()

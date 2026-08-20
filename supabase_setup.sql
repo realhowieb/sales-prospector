@@ -25,6 +25,7 @@ create table if not exists reps (
 -- If you created `reps` before rep management existed, add the new columns:
 alter table reps add column if not exists edit_code_hash text;
 alter table reps add column if not exists active boolean default true;
+alter table reps add column if not exists is_sample boolean default false;
 
 alter table reps enable row level security;
 
@@ -66,6 +67,42 @@ alter table leads enable row level security;
 -- Insert only for the public key; NO select policy => leads are not publicly
 -- readable. Reading requires the service_role key (which bypasses RLS).
 create policy "public insert leads" on leads for insert with check (true);
+
+
+-- ------------------------------------------------------------------------- --
+-- PIPELINE: private saved prospect stages, notes, and follow-up dates.
+-- The app reads/writes this table only with the Supabase service_role key after
+-- the rep enters their email in the sidebar. No public RLS policies are granted.
+-- ------------------------------------------------------------------------- --
+create table if not exists pipeline_entries (
+  id             bigint generated always as identity primary key,
+  created_at     timestamptz not null default now(),
+  updated_at     timestamptz not null default now(),
+  owner_email    text not null,
+  prospect_id    text not null,
+  name           text,
+  category       text,
+  stage          text,
+  note           text,
+  next_follow_up date,
+  outcome        text,
+  unique(owner_email, prospect_id)
+);
+
+alter table pipeline_entries enable row level security;
+
+create or replace function set_pipeline_updated_at()
+returns trigger as $$
+begin
+  new.updated_at = now();
+  return new;
+end;
+$$ language plpgsql;
+
+drop trigger if exists pipeline_entries_updated_at on pipeline_entries;
+create trigger pipeline_entries_updated_at
+before update on pipeline_entries
+for each row execute function set_pipeline_updated_at();
 
 
 -- ------------------------------------------------------------------------- --
