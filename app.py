@@ -265,6 +265,55 @@ def set_note(bid: str, note: str, name: str, cat: str):
 
 
 # --------------------------------------------------------------------------- #
+# Rep marketplace (customer side)
+# --------------------------------------------------------------------------- #
+# "Best deal" is a match score = deal strength + rating + response speed.
+RESPONSE_HOURS = {"< 1 hour": 0.5, "~2 hours": 2, "Same day": 8, "Within 24 hrs": 24, "1–2 days": 40}
+RESPONSE_OPTS = list(RESPONSE_HOURS.keys())
+
+# Seed roster so the marketplace is populated on day one. Reps can add themselves
+# at runtime; making listings visible to *every* visitor needs a shared datastore
+# (see README) — session listings are visible in the current browser only.
+REPS_SEED: list[dict] = [
+    {"id": "r1", "name": "Marcus Reed", "company": "Reed Digital Co.", "categories": ["Professional Svcs", "Retail Boutique"], "metros": ["Austin, TX", "Nashville, TN", "Denver, CO"], "deal": "20% off your first 3 months", "deal_strength": 0.80, "rating": 4.9, "reviews": 210, "response": "< 1 hour", "verified": True, "blurb": "Websites & local SEO for independent shops and service firms.", "email": "marcus@reeddigital.co", "phone": "(512) 555-0110"},
+    {"id": "r2", "name": "Priya Nair", "company": "BrightLeaf Marketing", "categories": ["Restaurant & Café", "Beauty & Spa"], "metros": ["Austin, TX", "Tampa, FL"], "deal": "Free brand audit + 15% off first campaign", "deal_strength": 0.70, "rating": 4.8, "reviews": 156, "response": "~2 hours", "verified": True, "blurb": "Social + email marketing that fills tables and chairs.", "email": "priya@brightleaf.com", "phone": "(813) 555-0132"},
+    {"id": "r3", "name": "Diego Alvarez", "company": "Frontier POS Systems", "categories": ["Restaurant & Café", "Retail Boutique"], "metros": ["Phoenix, AZ", "Denver, CO", "Austin, TX"], "deal": "First month free on any POS plan", "deal_strength": 0.75, "rating": 4.6, "reviews": 98, "response": "Same day", "verified": True, "blurb": "Point-of-sale & payments with next-day hardware.", "email": "diego@frontierpos.com", "phone": "(602) 555-0148"},
+    {"id": "r4", "name": "Sarah Kim", "company": "Uplift Payroll", "categories": ["Professional Svcs", "Medical & Dental"], "metros": ["Seattle, WA", "Portland, OR"], "deal": "Waived $300 setup fee", "deal_strength": 0.60, "rating": 4.9, "reviews": 301, "response": "< 1 hour", "verified": True, "blurb": "Payroll & HR for small teams; onboarding in 48 hours.", "email": "sarah@upliftpayroll.com", "phone": "(206) 555-0171"},
+    {"id": "r5", "name": "Tom Becker", "company": "Anvil Fitness Supply", "categories": ["Fitness & Gym"], "metros": ["Columbus, OH", "Chicago, IL", "Nashville, TN"], "deal": "25% volume discount on equipment", "deal_strength": 0.85, "rating": 4.4, "reviews": 67, "response": "Within 24 hrs", "verified": True, "blurb": "Commercial gym equipment, financing available.", "email": "tom@anvilfitness.com", "phone": "(614) 555-0195"},
+    {"id": "r6", "name": "Lena Fischer", "company": "Coastal Insurance Group", "categories": ["Auto Services", "Home Services", "Professional Svcs"], "metros": ["Tampa, FL", "Atlanta, GA"], "deal": "Price-match guarantee + $50 back", "deal_strength": 0.65, "rating": 4.7, "reviews": 142, "response": "~2 hours", "verified": True, "blurb": "Commercial liability & fleet coverage.", "email": "lena@coastalins.com", "phone": "(813) 555-0210"},
+    {"id": "r7", "name": "Andre Wallace", "company": "GreenRoute Logistics", "categories": ["Retail Boutique", "Home Services"], "metros": ["Atlanta, GA", "Nashville, TN"], "deal": "Free first delivery run", "deal_strength": 0.55, "rating": 4.5, "reviews": 54, "response": "Same day", "verified": False, "blurb": "Local same-day delivery for small retailers.", "email": "andre@greenroute.com", "phone": "(404) 555-0223"},
+    {"id": "r8", "name": "Mia Torres", "company": "Glow Supply Partners", "categories": ["Beauty & Spa"], "metros": ["Austin, TX", "Phoenix, AZ", "Tampa, FL"], "deal": "Buy 2 get 1 free on starter kits", "deal_strength": 0.70, "rating": 4.8, "reviews": 189, "response": "< 1 hour", "verified": True, "blurb": "Salon & spa product supply with net-30 terms.", "email": "mia@glowsupply.com", "phone": "(512) 555-0246"},
+    {"id": "r9", "name": "Kevin Osei", "company": "Meridian Medical Supply", "categories": ["Medical & Dental"], "metros": ["Chicago, IL", "Columbus, OH"], "deal": "10% off + net-60 terms", "deal_strength": 0.60, "rating": 4.9, "reviews": 223, "response": "Within 24 hrs", "verified": True, "blurb": "Consumables & equipment for clinics and dental offices.", "email": "kevin@meridianmed.com", "phone": "(312) 555-0268"},
+    {"id": "r10", "name": "Rachel Stone", "company": "Redline Auto Parts", "categories": ["Auto Services"], "metros": ["Denver, CO", "Phoenix, AZ", "Seattle, WA"], "deal": "Trade discount up to 30%", "deal_strength": 0.90, "rating": 4.3, "reviews": 78, "response": "1–2 days", "verified": False, "blurb": "Wholesale parts for independent repair shops.", "email": "rachel@redlineparts.com", "phone": "(303) 555-0281"},
+    {"id": "r11", "name": "Sam Whitfield", "company": "Homestead HVAC Wholesale", "categories": ["Home Services"], "metros": ["Portland, OR", "Seattle, WA", "Denver, CO"], "deal": "Free next-day shipping, no minimum", "deal_strength": 0.50, "rating": 4.6, "reviews": 110, "response": "Same day", "verified": True, "blurb": "HVAC parts & units for contractors.", "email": "sam@homesteadhvac.com", "phone": "(503) 555-0294"},
+    {"id": "r12", "name": "Nadia Haddad", "company": "Keystone Books & Supply", "categories": ["Retail Boutique", "Professional Svcs"], "metros": ["Nashville, TN", "Atlanta, GA", "Columbus, OH"], "deal": "15% off bulk orders", "deal_strength": 0.60, "rating": 4.7, "reviews": 95, "response": "~2 hours", "verified": True, "blurb": "Wholesale books, gifts & office supply.", "email": "nadia@keystonebooks.com", "phone": "(615) 555-0307"},
+    {"id": "r13", "name": "Chris Bell", "company": "PulsePoint Software", "categories": ["Fitness & Gym", "Beauty & Spa"], "metros": ["Austin, TX", "Denver, CO", "Portland, OR"], "deal": "Free 30-day trial + onboarding", "deal_strength": 0.80, "rating": 4.8, "reviews": 167, "response": "< 1 hour", "verified": True, "blurb": "Booking & membership software for studios and salons.", "email": "chris@pulsepoint.io", "phone": "(512) 555-0320"},
+    {"id": "r14", "name": "Olivia Grant", "company": "Harbor Dental Supply", "categories": ["Medical & Dental", "Beauty & Spa"], "metros": ["Tampa, FL", "Atlanta, GA", "Chicago, IL"], "deal": "$500 off first equipment order", "deal_strength": 0.75, "rating": 4.9, "reviews": 198, "response": "Within 24 hrs", "verified": True, "blurb": "Dental & aesthetic equipment with install.", "email": "olivia@harbordental.com", "phone": "(813) 555-0333"},
+    {"id": "r15", "name": "Derek Malone", "company": "Cornerstone Restaurant Supply", "categories": ["Restaurant & Café"], "metros": ["Chicago, IL", "Columbus, OH", "Nashville, TN"], "deal": "First month free + free install", "deal_strength": 0.80, "rating": 4.5, "reviews": 88, "response": "Same day", "verified": True, "blurb": "Kitchen equipment & smallwares, leasing available.", "email": "derek@cornerstonesupply.com", "phone": "(312) 555-0346"},
+    {"id": "r16", "name": "Fatima Yusuf", "company": "Vantage Financial Advisors", "categories": ["Professional Svcs"], "metros": ["Seattle, WA", "Portland, OR", "Phoenix, AZ"], "deal": "Free consult + reduced first-year fee", "deal_strength": 0.65, "rating": 5.0, "reviews": 134, "response": "< 1 hour", "verified": True, "blurb": "Bookkeeping, tax & advisory for small business.", "email": "fatima@vantageadvisors.com", "phone": "(206) 555-0359"},
+]
+
+
+def all_reps() -> list[dict]:
+    """Seed roster plus any reps added in this browser session."""
+    return REPS_SEED + st.session_state.setdefault("my_reps", [])
+
+
+def rep_score(rep: dict) -> int:
+    """Best-match score (0–100): deal strength (40) + rating (35) + response speed (25)."""
+    deal = rep.get("deal_strength", 0) * 40
+    rating = ((rep.get("rating", 4.0) - 3.0) / 2.0) * 35
+    hrs = RESPONSE_HOURS.get(rep.get("response", "Within 24 hrs"), 24)
+    resp = (1 - min(hrs, 48) / 48) * 25
+    return int(max(0, min(100, round(deal + rating + resp))))
+
+
+def log_intro_request(rep: dict):
+    reqs = st.session_state.setdefault("intro_requests", [])
+    reqs.append({"rep": rep["name"], "company": rep["company"], "when": datetime.now().strftime("%Y-%m-%d %H:%M")})
+
+
+# --------------------------------------------------------------------------- #
 # UI
 # --------------------------------------------------------------------------- #
 st.set_page_config(page_title=APP_TITLE, page_icon="📍", layout="wide")
@@ -280,33 +329,195 @@ st.markdown(
               border-radius:6px; margin:2px 4px 2px 0; background:rgba(128,128,128,.15);}
       .b-hot {background:#c6432a22; color:#c6432a;} .b-warm {background:#b67a1e22; color:#b67a1e;}
       .b-cool {background:#3e7c6422; color:#3e7c64;} .b-gap {background:#c9781f22; color:#c9781f;}
+      .b-verified {background:#0e5a5422; color:#0e5a54;} .b-new {background:#b67a1e22; color:#b67a1e;}
+      .repname {font-size:1.1rem; font-weight:700; line-height:1.15;}
+      .repco {color:#7d8a86; font-size:.82rem; margin-bottom:2px;}
+      .deal {margin:8px 0 4px; padding:9px 12px; border-radius:9px; font-weight:600; font-size:.9rem;
+             background:linear-gradient(90deg,#c9781f22,#0e5a5411); border:1px solid #c9781f44; color:inherit;}
+      .deal b {color:#c9781f;}
+      .matchbox {text-align:center; border:1px solid rgba(128,128,128,.25); border-radius:12px; padding:8px 4px;}
+      .matchnum {font-size:1.7rem; font-weight:800; line-height:1; color:#0e5a54;}
+      .matchlbl {font-size:.62rem; letter-spacing:.1em; text-transform:uppercase; color:#7d8a86;}
+      .stars {color:#b67a1e; letter-spacing:1px;}
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-st.title("📍 Territory Prospector")
-st.caption("Find new business customers by area & category — live data from OpenStreetMap, no API key required.")
-
-# ---- Sidebar: search controls ----
+# ---- Audience switch (who's using the app right now) ----
 with st.sidebar:
-    st.header("Search a territory")
-    metro = st.selectbox("Metro area", list(METROS.keys()), index=0)
-    custom = st.text_input("…or type any city / area", placeholder="e.g. Boise, ID", help="Uses OpenStreetMap geocoding.")
-    cats = st.multiselect(
-        "Categories", list(CATEGORIES.keys()),
-        default=["Restaurant & Café", "Fitness & Gym", "Beauty & Spa"],
+    audience = st.radio(
+        "I am a…",
+        ["🧭 Sales rep — find customers", "🛍️ Customer — find a rep & deals"],
+        label_visibility="collapsed",
     )
-    cap = st.slider("Max results", 50, 400, 200, step=50, help="Higher = more coverage but slower queries.")
-    go = st.button("🔍 Search territory", type="primary", use_container_width=True)
-    st.divider()
-    st.subheader("Refine results")
-    min_score = st.slider("Min lead score", 0, 100, 0, step=5)
-    only_no_web = st.toggle("Only businesses without a website", value=False)
-    indie_only = st.toggle("Independents only (hide chains)", value=False)
-    heat_filter = st.multiselect("Lead heat", ["Hot", "Warm", "Cool"], default=[])
-    sort_by = st.selectbox("Sort by", ["Lead score", "Name (A–Z)", "Category"])
+rep_mode = audience.startswith("🧭")
 
+if rep_mode:
+    st.title("📍 Territory Prospector")
+    st.caption("Find new business customers by area & category — live data from OpenStreetMap, no API key required.")
+else:
+    st.title("🛍️ Find a Rep · Best Deals")
+    st.caption("Tell us what you need and where — matched reps compete on their offer, rating, and response time.")
+
+# ---- Sidebar controls (per audience) ----
+with st.sidebar:
+    st.divider()
+    if rep_mode:
+        st.header("Search a territory")
+        metro = st.selectbox("Metro area", list(METROS.keys()), index=0)
+        custom = st.text_input("…or type any city / area", placeholder="e.g. Boise, ID", help="Uses OpenStreetMap geocoding.")
+        cats = st.multiselect(
+            "Categories", list(CATEGORIES.keys()),
+            default=["Restaurant & Café", "Fitness & Gym", "Beauty & Spa"],
+        )
+        cap = st.slider("Max results", 50, 400, 200, step=50, help="Higher = more coverage but slower queries.")
+        go = st.button("🔍 Search territory", type="primary", use_container_width=True)
+        st.divider()
+        st.subheader("Refine results")
+        min_score = st.slider("Min lead score", 0, 100, 0, step=5)
+        only_no_web = st.toggle("Only businesses without a website", value=False)
+        indie_only = st.toggle("Independents only (hide chains)", value=False)
+        heat_filter = st.multiselect("Lead heat", ["Hot", "Warm", "Cool"], default=[])
+        sort_by = st.selectbox("Sort by", ["Lead score", "Name (A–Z)", "Category"])
+    else:
+        st.header("What do you need?")
+        cust_category = st.selectbox("I'm looking for", ["Any category"] + list(CATEGORIES.keys()))
+        cust_metro = st.selectbox("My area", ["Anywhere"] + list(METROS.keys()))
+        cust_min_rating = st.slider("Minimum rating", 0.0, 5.0, 0.0, step=0.5)
+        cust_sort = st.selectbox("Rank by", ["Best match", "Best deal", "Top rated", "Fastest response"])
+
+# --------------------------------------------------------------------------- #
+# Customer mode: find a rep + best deals
+# --------------------------------------------------------------------------- #
+def rep_card(rep: dict, score: int):
+    n = round(rep.get("rating", 0))
+    stars = "★" * n + "☆" * (5 - n)
+    cats_html = " · ".join(rep["categories"])
+    metros_html = ", ".join(rep["metros"])
+    is_new = rep.get("reviews", 0) == 0
+    with st.container():
+        st.markdown('<div class="prospect">', unsafe_allow_html=True)
+        c1, c2 = st.columns([5, 2])
+        with c1:
+            badges = ""
+            if rep.get("verified"):
+                badges += '<span class="badge b-verified">✓ Verified</span>'
+            if is_new:
+                badges += '<span class="badge b-new">New listing</span>'
+            rating_txt = "Unrated" if is_new else f'{rep["rating"]:.1f} ({rep["reviews"]})'
+            st.markdown(
+                f'<div class="repname">{rep["company"]}</div>'
+                f'<div class="repco">{rep["name"]} · {cats_html}</div>'
+                f'{badges}'
+                f'<span class="badge">📍 {metros_html}</span>'
+                f'<span class="badge"><span class="stars">{stars}</span> {rating_txt}</span>'
+                f'<span class="badge">⏱ {rep["response"]}</span>'
+                f'<div class="deal">🏷️ <b>Deal:</b> {rep["deal"]}</div>'
+                f'<div class="pmeta">{rep.get("blurb", "")}</div>',
+                unsafe_allow_html=True,
+            )
+            with st.expander("📇 Contact & request an intro"):
+                st.write(f"**{rep['name']}** — {rep['company']}")
+                st.write(f"✉️ {rep['email']}")
+                st.write(f"📞 {rep['phone']}")
+                if st.button("Request an intro", key=f"req_{rep['id']}"):
+                    log_intro_request(rep)
+                    st.success("Intro requested — saved in-app. (No email is actually sent in this demo.)")
+        with c2:
+            st.markdown(
+                f'<div class="matchbox"><div class="matchnum">{score}</div>'
+                f'<div class="matchlbl">Match score</div></div>',
+                unsafe_allow_html=True,
+            )
+        st.markdown("</div>", unsafe_allow_html=True)
+
+
+def render_marketplace():
+    matched = []
+    for rep in all_reps():
+        if cust_category != "Any category" and cust_category not in rep["categories"]:
+            continue
+        if cust_metro != "Anywhere" and cust_metro not in rep["metros"]:
+            continue
+        if rep.get("rating", 0) < cust_min_rating:
+            continue
+        matched.append((rep, rep_score(rep)))
+
+    if cust_sort == "Best deal":
+        matched.sort(key=lambda x: x[0].get("deal_strength", 0), reverse=True)
+    elif cust_sort == "Top rated":
+        matched.sort(key=lambda x: x[0].get("rating", 0), reverse=True)
+    elif cust_sort == "Fastest response":
+        matched.sort(key=lambda x: RESPONSE_HOURS.get(x[0].get("response"), 24))
+    else:  # Best match
+        matched.sort(key=lambda x: x[1], reverse=True)
+
+    want = "any service" if cust_category == "Any category" else cust_category
+    where = "any area" if cust_metro == "Anywhere" else cust_metro
+    st.subheader(f"{len(matched)} reps competing for your business · {want} · {where}")
+
+    if not matched:
+        st.info("No reps match yet. Try **Any category** / **Anywhere**, or lower the minimum rating.")
+    else:
+        fast = sum(1 for rep, _ in matched if RESPONSE_HOURS.get(rep["response"], 24) <= 2)
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Reps matched", len(matched))
+        m2.metric("Top match score", matched[0][1])
+        m3.metric("⏱ Reply within ~2 hrs", fast)
+        st.divider()
+        for rep, sc in matched:
+            rep_card(rep, sc)
+
+    st.divider()
+    with st.expander("🙋 List yourself as a rep — get found by customers"):
+        with st.form("list_rep", clear_on_submit=True):
+            colA, colB = st.columns(2)
+            f_name = colA.text_input("Your name")
+            f_company = colB.text_input("Company")
+            f_cats = st.multiselect("Categories you serve", list(CATEGORIES.keys()))
+            f_metros = st.multiselect("Territories you cover", list(METROS.keys()))
+            f_deal = st.text_input("Your headline deal", placeholder="e.g. 20% off first order")
+            f_strength = st.slider("How strong is this offer?", 0.0, 1.0, 0.5, step=0.05,
+                                   help="Ranks you on 'best deal'. 1.0 = a standout offer.")
+            f_resp = st.selectbox("Typical response time", RESPONSE_OPTS, index=2)
+            colC, colD = st.columns(2)
+            f_email = colC.text_input("Contact email")
+            f_phone = colD.text_input("Contact phone")
+            submitted = st.form_submit_button("➕ Add my listing")
+        if submitted:
+            if not (f_name and f_company and f_cats and f_metros and f_deal):
+                st.error("Please fill name, company, at least one category & territory, and your deal.")
+            else:
+                mine = st.session_state.setdefault("my_reps", [])
+                mine.append({
+                    "id": f"me-{len(mine) + 1}", "name": f_name, "company": f_company,
+                    "categories": f_cats, "metros": f_metros, "deal": f_deal,
+                    "deal_strength": f_strength, "rating": 0.0, "reviews": 0,
+                    "response": f_resp, "verified": False, "blurb": "New rep listing.",
+                    "email": f_email or "—", "phone": f_phone or "—",
+                })
+                st.success(f"You're listed! Customers searching {', '.join(f_cats)} can now find {f_company}.")
+                st.rerun()
+        st.caption(
+            "Listings added here are visible in **this browser session** only. To make the "
+            "marketplace shared across all visitors, connect a datastore (Google Sheets or "
+            "Supabase) — see the README."
+        )
+
+    reqs = st.session_state.get("intro_requests", [])
+    if reqs:
+        st.divider()
+        st.caption("Intros requested this session: " + ", ".join(r["company"] for r in reqs[-6:]))
+
+
+# Customer mode renders here and halts before the rep-mode code below.
+if not rep_mode:
+    render_marketplace()
+    st.stop()
+
+
+# ========================= REP MODE (find customers) ======================== #
 # ---- Run the search ----
 if go:
     if not cats:

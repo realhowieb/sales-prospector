@@ -1,9 +1,28 @@
 # Territory Prospector
 
-A Streamlit app for field sales reps to **discover new business customers** by area and
-category, using **live OpenStreetMap data** via the public Overpass API — **no API key, no billing.**
+A two-sided Streamlit app:
 
-## What it does
+- **Sales reps** → **discover new business customers** by area and category, using **live
+  OpenStreetMap data** via the public Overpass API (no API key, no billing).
+- **Customers/businesses** → **find a rep and the best deals**. An open marketplace where
+  reps list their offer, and customers are matched to reps ranked by a **best-match score**
+  (deal strength + rating + response time).
+
+Switch between the two with the **"I am a…"** toggle at the top of the sidebar.
+
+## Customer marketplace — best-match score
+`score = deal strength (40) + rating (35) + response speed (25)`, 0–100. Customers filter by
+what they need + where they are, and sort by Best match / Best deal / Top rated / Fastest
+response. Reps can **list themselves** via the in-app form.
+
+> **Marketplace persistence (important):** the marketplace ships with a seeded roster so it's
+> populated on day one. Listings a rep adds via the form are stored in **that browser session
+> only** — they are *not* yet visible to other visitors. Making the open marketplace truly
+> shared requires a **shared datastore** (there's no free public source for reps like there is
+> for businesses). Next step: wire listings + intro-requests to **Google Sheets** (service
+> account) or **Supabase** (Postgres) — one secret, added per the three-secret-stores pattern.
+
+## Rep side — what it does
 - Search any US metro (presets) or type any city (geocoded via OSM Nominatim).
 - Pull real businesses in 8 categories (restaurants, fitness, auto, home services,
   medical, retail, professional services, beauty).
