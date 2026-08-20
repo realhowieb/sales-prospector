@@ -42,8 +42,27 @@ it on:
    sample reps** once to populate, or let real reps register via **List yourself as a rep**.
 
 **Moderation:** anyone can insert (that's what "open" means). Flip `verified` to true or delete
-spam from the Supabase Table Editor. Intro requests are currently session-only — persisting and
-notifying reps is a natural next step (add an `intro_requests` table + email).
+spam from the Supabase Table Editor.
+
+### Delivering the leads (customer → rep)
+When a customer hits **Request an intro** on a rep card, they submit their name + email/phone +
+a short message. That lead is:
+
+1. **Saved to Supabase** (`leads` table — created by the same `supabase_setup.sql`). The table is
+   **insert-only for the public key and has no read policy**, so customer contact details are
+   never exposed through the public API.
+2. **Emailed to the rep** via **Resend over SMTP** (reusing the `hsfinest.ai` verified domain),
+   with `Reply-To` set to the customer so the rep can reply directly. Configure under `[smtp]` in
+   secrets — only the Resend API key (`password`) and a `from` address are required.
+
+**Rep leads inbox:** the marketplace has a **"Check my leads"** box where a rep enters their email
+to see their leads. Because leads aren't publicly readable, this requires the Supabase
+**service_role** key (`[supabase].service_key`) — a server-side secret that never reaches the
+browser. Without it, leads are still saved and emailed; only the in-app inbox is hidden.
+
+Each piece degrades gracefully: no email secret → leads are still saved; no Supabase → the request
+is logged for the session (demo). So the app never errors, it just does as much as it's configured
+to do.
 
 ## Rep side — what it does
 - Search any US metro (presets) or type any city (geocoded via OSM Nominatim).

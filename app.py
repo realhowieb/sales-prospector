@@ -8,8 +8,10 @@ Pipeline stages & notes live in the browser session; export/import as CSV to kee
 from __future__ import annotations
 
 import io
+import smtplib
 import time
 from datetime import datetime
+from email.message import EmailMessage
 
 import pandas as pd
 import requests
@@ -313,8 +315,31 @@ def _supabase_cfg():
 
 SUPABASE_URL, SUPABASE_KEY = _supabase_cfg()
 SUPABASE_ON = bool(SUPABASE_URL and SUPABASE_KEY)
+try:
+    SUPABASE_SERVICE_KEY = st.secrets["supabase"]["service_key"] or None
+except Exception:
+    SUPABASE_SERVICE_KEY = None
 REP_FIELDS = ["name", "company", "categories", "metros", "deal", "deal_strength",
               "rating", "reviews", "response", "verified", "blurb", "email", "phone"]
+LEAD_FIELDS = ["rep_id", "rep_company", "rep_email", "customer_name",
+               "customer_email", "customer_phone", "message", "category", "metro"]
+
+
+def _email_cfg():
+    """Resend-over-SMTP config from secrets. Only `password` (Resend key) + `from` required."""
+    try:
+        s = st.secrets["smtp"]
+        pwd, frm = s["password"], s["from"]
+        if pwd and frm:
+            return {"host": s.get("host", "smtp.resend.com"), "port": int(s.get("port", 587)),
+                    "user": s.get("user", "resend"), "password": pwd, "from": frm}
+    except Exception:
+        pass
+    return None
+
+
+EMAIL_CFG = _email_cfg()
+EMAIL_ON = EMAIL_CFG is not None
 
 
 def _sb_headers(extra: dict | None = None) -> dict:
@@ -378,6 +403,93 @@ def all_reps() -> list[dict]:
     return REPS_SEED + st.session_state.setdefault("my_reps", [])
 
 
+# ---- Leads: capture customer requests, notify the rep --------------------- #
+def _sb_service_headers() -> dict:
+    return {"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+            "Content-Type": "application/json"}
+
+
+def insert_lead_db(lead: dict):
+    """Save a lead to Supabase. Uses the anon key (insert-only policy — not publicly readable)."""
+    r = requests.post(f"{SUPABASE_URL}/rest/v1/leads",
+                      headers=_sb_headers({"Prefer": "return=minimal"}),
+                      json={k: lead.get(k) for k in LEAD_FIELDS}, timeout=20)
+    _sb_check(r)
+
+
+def fetch_leads_db(rep_email: str) -> list[dict]:
+    """Read a rep's leads. Requires the service_role key (leads aren't publicly readable)."""
+    r = requests.get(f"{SUPABASE_URL}/rest/v1/leads", headers=_sb_service_headers(),
+                     params={"select": "*", "rep_email": f"eq.{rep_email}",
+                             "order": "created_at.desc"}, timeout=20)
+    _sb_check(r)
+    return r.json()
+
+
+def send_lead_email(rep: dict, lead: dict) -> bool:
+    """Notify the rep of a new lead via Resend SMTP. Returns True if actually sent."""
+    to = (rep.get("email") or "").strip()
+    if not EMAIL_ON or "@" not in to:
+        return False
+    msg = EmailMessage()
+    msg["Subject"] = f"New lead from {lead['customer_name']} — Find a Rep"
+    msg["From"] = EMAIL_CFG["from"]
+    msg["To"] = to
+    if lead.get("customer_email"):
+        msg["Reply-To"] = lead["customer_email"]
+    msg.set_content("\n".join([
+        f"You have a new lead from the Find a Rep marketplace for {rep['company']}.",
+        "",
+        f"Name:        {lead['customer_name']}",
+        f"Email:       {lead.get('customer_email') or '—'}",
+        f"Phone:       {lead.get('customer_phone') or '—'}",
+        f"Looking for: {lead.get('category') or 'any service'} in {lead.get('metro') or 'any area'}",
+        "",
+        "Message:",
+        lead.get("message") or "(none)",
+        "",
+        "Reply directly to this email to reach them.",
+    ]))
+    with smtplib.SMTP(EMAIL_CFG["host"], EMAIL_CFG["port"], timeout=20) as s:
+        s.starttls()
+        s.login(EMAIL_CFG["user"], EMAIL_CFG["password"])
+        s.send_message(msg)
+    return True
+
+
+def submit_lead(rep: dict, name: str, email: str, phone: str, message: str):
+    lead = {
+        "rep_id": str(rep.get("id", "")), "rep_company": rep.get("company", ""),
+        "rep_email": rep.get("email", ""), "customer_name": name,
+        "customer_email": email, "customer_phone": phone, "message": message,
+        "category": "" if cust_category == "Any category" else cust_category,
+        "metro": "" if cust_metro == "Anywhere" else cust_metro,
+    }
+    saved = emailed = False
+    err = None
+    if SUPABASE_ON:
+        try:
+            insert_lead_db(lead)
+            saved = True
+        except Exception as exc:
+            err = str(exc)
+    try:
+        emailed = send_lead_email(rep, lead)
+    except Exception as exc:
+        err = err or str(exc)
+    st.session_state.setdefault("intro_requests", []).append(
+        {"rep": rep["name"], "company": rep["company"],
+         "when": datetime.now().strftime("%Y-%m-%d %H:%M")})
+    if emailed:
+        st.success(f"Sent! {rep['company']} received your request by email and will reach out.")
+    elif saved:
+        st.success(f"Request delivered to {rep['company']}'s leads — they'll follow up.")
+    else:
+        st.info(f"Request logged for {rep['company']} (demo mode — add Supabase/email secrets to deliver it).")
+    if err and not (saved or emailed):
+        st.caption(f"Delivery note: {err}")
+
+
 def rep_score(rep: dict) -> int:
     """Best-match score (0–100): deal strength (40) + rating (35) + response speed (25)."""
     deal = rep.get("deal_strength", 0) * 40
@@ -385,11 +497,6 @@ def rep_score(rep: dict) -> int:
     hrs = RESPONSE_HOURS.get(rep.get("response", "Within 24 hrs"), 24)
     resp = (1 - min(hrs, 48) / 48) * 25
     return int(max(0, min(100, round(deal + rating + resp))))
-
-
-def log_intro_request(rep: dict):
-    reqs = st.session_state.setdefault("intro_requests", [])
-    reqs.append({"rep": rep["name"], "company": rep["company"], "when": datetime.now().strftime("%Y-%m-%d %H:%M")})
 
 
 # --------------------------------------------------------------------------- #
@@ -496,13 +603,21 @@ def rep_card(rep: dict, score: int):
                 f'<div class="pmeta">{rep.get("blurb", "")}</div>',
                 unsafe_allow_html=True,
             )
-            with st.expander("📇 Contact & request an intro"):
-                st.write(f"**{rep['name']}** — {rep['company']}")
-                st.write(f"✉️ {rep['email']}")
-                st.write(f"📞 {rep['phone']}")
-                if st.button("Request an intro", key=f"req_{rep['id']}"):
-                    log_intro_request(rep)
-                    st.success("Intro requested — saved in-app. (No email is actually sent in this demo.)")
+            with st.expander("📨 Request an intro / claim this deal"):
+                st.caption(f"Send your details to {rep['name']} at {rep['company']} — they'll reach out directly.")
+                with st.form(f"lead_{rep['id']}", clear_on_submit=True):
+                    ln = st.text_input("Your name", key=f"ln_{rep['id']}")
+                    lc1, lc2 = st.columns(2)
+                    le = lc1.text_input("Your email", key=f"le_{rep['id']}")
+                    lp = lc2.text_input("Phone (optional)", key=f"lp_{rep['id']}")
+                    lm = st.text_area("What do you need?", key=f"lm_{rep['id']}",
+                                      placeholder="One line on what you're looking for…")
+                    sent = st.form_submit_button("Send my request")
+                if sent:
+                    if not ln or not (le or lp):
+                        st.error("Add your name and an email or phone so the rep can reply.")
+                    else:
+                        submit_lead(rep, ln.strip(), le.strip(), lp.strip(), lm.strip())
         with c2:
             st.markdown(
                 f'<div class="matchbox"><div class="matchnum">{score}</div>'
@@ -608,10 +723,34 @@ def render_marketplace():
             "🟡 Demo: listings live in this browser session only. Add Supabase secrets to go live (see README)."
         )
 
+    with st.expander("📥 Are you a listed rep? Check your leads"):
+        if not SUPABASE_ON:
+            st.caption("The leads inbox needs the live marketplace (Supabase) configured — see README.")
+        elif not SUPABASE_SERVICE_KEY:
+            st.caption("The in-app inbox needs a Supabase **service_role** key in secrets "
+                       "(`[supabase].service_key`). Leads are still emailed to reps without it.")
+        else:
+            rep_email = st.text_input("Your rep email", key="lead_lookup",
+                                      placeholder="the email on your listing")
+            if st.button("Show my leads") and rep_email.strip():
+                try:
+                    leads = fetch_leads_db(rep_email.strip())
+                    if not leads:
+                        st.info("No leads yet for that email.")
+                    else:
+                        cols = ["created_at", "customer_name", "customer_email",
+                                "customer_phone", "message", "category", "metro"]
+                        ldf = pd.DataFrame(leads)
+                        st.caption(f"{len(ldf)} lead(s)")
+                        st.dataframe(ldf[[c for c in cols if c in ldf.columns]],
+                                     use_container_width=True, hide_index=True)
+                except Exception as exc:
+                    st.error(f"Couldn't load leads: {exc}")
+
     reqs = st.session_state.get("intro_requests", [])
     if reqs:
         st.divider()
-        st.caption("Intros requested this session: " + ", ".join(r["company"] for r in reqs[-6:]))
+        st.caption("Requests you've sent this session: " + ", ".join(r["company"] for r in reqs[-6:]))
 
 
 # Customer mode renders here and halts before the rep-mode code below.
