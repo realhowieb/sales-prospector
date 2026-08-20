@@ -770,6 +770,13 @@ with tab_pipeline:
     else:
         prows = [{"id": k, **v} for k, v in p.items()]
         pdf = pd.DataFrame(prows)
+        # Entries may carry only a stage or only a note, so guarantee every column
+        # exists (and has no NaN) before we select/sort on them.
+        for _col in ["name", "category", "stage", "note"]:
+            if _col not in pdf.columns:
+                pdf[_col] = ""
+        pdf["stage"] = pdf["stage"].fillna("")
+        pdf["note"] = pdf["note"].fillna("")
         order = {s: i for i, s in enumerate(STAGES)}
         pdf["ord"] = pdf["stage"].map(lambda s: order.get(s, 99))
         pdf = pdf.sort_values("ord").drop(columns="ord")
