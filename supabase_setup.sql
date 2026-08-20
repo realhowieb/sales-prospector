@@ -59,3 +59,23 @@ alter table leads enable row level security;
 -- Insert only for the public key; NO select policy => leads are not publicly
 -- readable. Reading requires the service_role key (which bypasses RLS).
 create policy "public insert leads" on leads for insert with check (true);
+
+
+-- ------------------------------------------------------------------------- --
+-- REVIEWS: customers rate reps. Reviews are meant to be public, so both read
+-- and insert are allowed for the anon key. The app shows a rep's real average
+-- (replacing any seeded rating) once reviews exist.
+-- ------------------------------------------------------------------------- --
+create table if not exists reviews (
+  id            bigint generated always as identity primary key,
+  created_at    timestamptz not null default now(),
+  rep_id        text not null,
+  rating        int not null check (rating between 1 and 5),
+  customer_name text,
+  comment       text
+);
+
+alter table reviews enable row level security;
+
+create policy "public read reviews"   on reviews for select using (true);
+create policy "public insert reviews" on reviews for insert with check (true);

@@ -491,13 +491,71 @@ def submit_lead(rep: dict, name: str, email: str, phone: str, message: str):
         st.caption(f"Delivery note: {err}")
 
 
-def rep_score(rep: dict) -> int:
+# ---- Ratings & reviews ---------------------------------------------------- #
+@st.cache_data(ttl=45, show_spinner=False)
+def fetch_reviews_db() -> list[dict]:
+    r = requests.get(f"{SUPABASE_URL}/rest/v1/reviews", headers=_sb_headers(),
+                     params={"select": "*", "order": "created_at.desc"}, timeout=20)
+    _sb_check(r)
+    return r.json()
+
+
+def all_reviews() -> list[dict]:
+    if SUPABASE_ON:
+        try:
+            return fetch_reviews_db()
+        except Exception:
+            return []
+    return st.session_state.setdefault("session_reviews", [])
+
+
+def reviews_summary(reviews: list[dict]) -> dict:
+    """rep_id -> {avg, count, recent[]}."""
+    agg: dict = {}
+    for rv in reviews:
+        rid = str(rv.get("rep_id", ""))
+        a = agg.setdefault(rid, {"sum": 0, "count": 0, "recent": []})
+        try:
+            a["sum"] += int(rv.get("rating", 0))
+            a["count"] += 1
+        except (TypeError, ValueError):
+            continue
+        if len(a["recent"]) < 3 and rv.get("comment"):
+            a["recent"].append(rv)
+    for a in agg.values():
+        a["avg"] = round(a["sum"] / a["count"], 1) if a["count"] else 0.0
+    return agg
+
+
+def effective_rating(rep: dict, summary: dict):
+    """Real review average when reviews exist, else the listing's own (seed) value."""
+    a = summary.get(str(rep.get("id", "")))
+    if a and a["count"] > 0:
+        return a["avg"], a["count"], True
+    return float(rep.get("rating", 0) or 0), int(rep.get("reviews", 0) or 0), False
+
+
+def insert_review(rep: dict, rating: int, name: str, comment: str):
+    rec = {"rep_id": str(rep.get("id", "")), "rating": int(rating),
+           "customer_name": name or "Anonymous", "comment": comment or ""}
+    if SUPABASE_ON:
+        r = requests.post(f"{SUPABASE_URL}/rest/v1/reviews",
+                          headers=_sb_headers({"Prefer": "return=minimal"}),
+                          json=rec, timeout=20)
+        _sb_check(r)
+        fetch_reviews_db.clear()
+    else:
+        st.session_state.setdefault("session_reviews", []).append(rec)
+
+
+def rep_score(rep: dict, rating: float | None = None) -> int:
     """Best-match score (0–100): deal strength (40) + rating (35) + response speed (25)."""
     deal = rep.get("deal_strength", 0) * 40
-    rating = ((rep.get("rating", 4.0) - 3.0) / 2.0) * 35
+    rt = rep.get("rating", 4.0) if rating is None else rating
+    rating_c = ((rt - 3.0) / 2.0) * 35
     hrs = RESPONSE_HOURS.get(rep.get("response", "Within 24 hrs"), 24)
     resp = (1 - min(hrs, 48) / 48) * 25
-    return int(max(0, min(100, round(deal + rating + resp))))
+    return int(max(0, min(100, round(deal + rating_c + resp))))
 
 
 # --------------------------------------------------------------------------- #
@@ -577,12 +635,13 @@ with st.sidebar:
 # --------------------------------------------------------------------------- #
 # Customer mode: find a rep + best deals
 # --------------------------------------------------------------------------- #
-def rep_card(rep: dict, score: int):
-    n = round(rep.get("rating", 0))
+def rep_card(rep: dict, score: int, rating: float, rcount: int, real: bool, recent: list):
+    n = round(rating)
     stars = "★" * n + "☆" * (5 - n)
     cats_html = " · ".join(rep["categories"])
     metros_html = ", ".join(rep["metros"])
-    is_new = rep.get("reviews", 0) == 0
+    is_new = rcount == 0
+    rating_txt = "Unrated" if is_new else f'{rating:.1f} ({rcount})'
     with st.container():
         st.markdown('<div class="prospect">', unsafe_allow_html=True)
         c1, c2 = st.columns([5, 2])
@@ -592,7 +651,6 @@ def rep_card(rep: dict, score: int):
                 badges += '<span class="badge b-verified">✓ Verified</span>'
             if is_new:
                 badges += '<span class="badge b-new">New listing</span>'
-            rating_txt = "Unrated" if is_new else f'{rep["rating"]:.1f} ({rep["reviews"]})'
             st.markdown(
                 f'<div class="repname">{rep["company"]}</div>'
                 f'<div class="repco">{rep["name"]} · {cats_html}</div>'
@@ -619,6 +677,30 @@ def rep_card(rep: dict, score: int):
                         st.error("Add your name and an email or phone so the rep can reply.")
                     else:
                         submit_lead(rep, ln.strip(), le.strip(), lp.strip(), lm.strip())
+            with st.expander(f"⭐ Reviews ({rcount}) · leave a review"):
+                if recent:
+                    for rv in recent:
+                        rn_ = int(rv.get("rating", 0) or 0)
+                        st.markdown(
+                            f'<span class="stars">{"★" * rn_}{"☆" * (5 - rn_)}</span> '
+                            f'**{rv.get("customer_name") or "Anonymous"}** — '
+                            f'{rv.get("comment") or ""}',
+                            unsafe_allow_html=True,
+                        )
+                elif not is_new:
+                    st.caption("No written reviews yet.")
+                with st.form(f"rev_{rep['id']}", clear_on_submit=True):
+                    rr = st.slider("Your rating", 1, 5, 5, key=f"rr_{rep['id']}")
+                    rn = st.text_input("Your name", key=f"rn_{rep['id']}")
+                    rc = st.text_area("Comment (optional)", key=f"rc_{rep['id']}")
+                    rsent = st.form_submit_button("Submit review")
+                if rsent:
+                    try:
+                        insert_review(rep, rr, rn.strip(), rc.strip())
+                        st.success("Thanks — your review is in.")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Couldn't save review: {exc}")
         with c2:
             st.markdown(
                 f'<div class="matchbox"><div class="matchnum">{score}</div>'
@@ -630,20 +712,23 @@ def rep_card(rep: dict, score: int):
 
 def render_marketplace():
     roster = all_reps()
+    summary = reviews_summary(all_reviews())
     matched = []
     for rep in roster:
         if cust_category != "Any category" and cust_category not in rep["categories"]:
             continue
         if cust_metro != "Anywhere" and cust_metro not in rep["metros"]:
             continue
-        if rep.get("rating", 0) < cust_min_rating:
+        rating, rcount, real = effective_rating(rep, summary)
+        if rating < cust_min_rating:
             continue
-        matched.append((rep, rep_score(rep)))
+        recent = summary.get(str(rep.get("id", "")), {}).get("recent", [])
+        matched.append((rep, rep_score(rep, rating), rating, rcount, real, recent))
 
     if cust_sort == "Best deal":
         matched.sort(key=lambda x: x[0].get("deal_strength", 0), reverse=True)
     elif cust_sort == "Top rated":
-        matched.sort(key=lambda x: x[0].get("rating", 0), reverse=True)
+        matched.sort(key=lambda x: (x[2], x[3]), reverse=True)
     elif cust_sort == "Fastest response":
         matched.sort(key=lambda x: RESPONSE_HOURS.get(x[0].get("response"), 24))
     else:  # Best match
@@ -670,14 +755,14 @@ def render_marketplace():
     if not matched:
         st.info("No reps match yet. Try **Any category** / **Anywhere**, or lower the minimum rating.")
     else:
-        fast = sum(1 for rep, _ in matched if RESPONSE_HOURS.get(rep["response"], 24) <= 2)
+        fast = sum(1 for m in matched if RESPONSE_HOURS.get(m[0]["response"], 24) <= 2)
         m1, m2, m3 = st.columns(3)
         m1.metric("Reps matched", len(matched))
         m2.metric("Top match score", matched[0][1])
         m3.metric("⏱ Reply within ~2 hrs", fast)
         st.divider()
-        for rep, sc in matched:
-            rep_card(rep, sc)
+        for rep, sc, rating, rcount, real, recent in matched:
+            rep_card(rep, sc, rating, rcount, real, recent)
 
     st.divider()
     with st.expander("🙋 List yourself as a rep — get found by customers"):
