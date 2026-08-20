@@ -325,6 +325,19 @@ def _sb_headers(extra: dict | None = None) -> dict:
     return h
 
 
+def _sb_check(r):
+    """Raise a human-readable error (with Supabase's own message + a hint) on failure."""
+    if r.status_code >= 400:
+        hint = ""
+        if r.status_code == 404:
+            hint = (" — the 'reps' table wasn't found. Run supabase_setup.sql in your "
+                    "Supabase SQL Editor, and double-check the `url` secret is the Project URL.")
+        elif r.status_code in (401, 403):
+            hint = (" — check the anon key, and that the RLS read/insert policies from "
+                    "supabase_setup.sql exist on the table.")
+        raise RuntimeError(f"Supabase {r.status_code}: {r.text[:300]}{hint}")
+
+
 @st.cache_data(ttl=45, show_spinner=False)
 def fetch_reps_db() -> list[dict]:
     """Read every listing from the shared Supabase table."""
@@ -332,7 +345,7 @@ def fetch_reps_db() -> list[dict]:
         f"{SUPABASE_URL}/rest/v1/reps", headers=_sb_headers(),
         params={"select": "*", "order": "created_at.desc"}, timeout=20,
     )
-    r.raise_for_status()
+    _sb_check(r)
     rows = r.json()
     for row in rows:
         row["id"] = f"db-{row.get('id')}"
@@ -350,7 +363,7 @@ def insert_reps_db(reps: list[dict]):
         f"{SUPABASE_URL}/rest/v1/reps",
         headers=_sb_headers({"Prefer": "return=minimal"}), json=payload, timeout=20,
     )
-    r.raise_for_status()
+    _sb_check(r)
     fetch_reps_db.clear()
 
 
