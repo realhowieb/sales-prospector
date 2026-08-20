@@ -26,10 +26,12 @@ The app reads/writes Supabase over its REST API using `requests` (no extra depen
 it on:
 
 1. Create a free project at [supabase.com](https://supabase.com).
-2. **SQL Editor → run [`supabase_setup.sql`](supabase_setup.sql)** — creates the `reps` table and
-   RLS policies allowing public read + insert (no update/delete).
-3. **Project Settings → API** → copy the **Project URL** and the **anon public key**.
-4. Add them as secrets (they're safe with the RLS above):
+2. **SQL Editor → run [`supabase_setup.sql`](supabase_setup.sql)** — creates the marketplace,
+   leads, reviews, and pipeline tables with public read policies only where needed.
+3. **Project Settings → API** → copy the **Project URL**, the **anon public key**, and the
+   **service_role** key. The service key stays server-side in Streamlit secrets and is required
+   for listing submissions, lead capture, verified reviews, listing management, and pipeline sync.
+4. Add them as secrets:
    - **Streamlit Cloud:** app → Settings → Secrets → paste the `[supabase]` block.
    - **Local:** copy [`.streamlit/secrets.toml.example`](.streamlit/secrets.toml.example) to
      `.streamlit/secrets.toml` and fill in the values (this file is gitignored).
@@ -37,20 +39,25 @@ it on:
    [supabase]
    url = "https://YOUR-PROJECT-REF.supabase.co"
    key = "YOUR-ANON-PUBLIC-KEY"
+   service_key = "YOUR-SERVICE-ROLE-KEY"
+
+   [app]
+   base_url = "https://YOUR-STREAMLIT-APP-URL"
    ```
 5. Reload. The Customer tab now shows **🟢 Live marketplace**. Empty at first — use **Load 16
    sample reps** once to populate, or let real reps register via **List yourself as a rep**.
 
-**Moderation:** anyone can insert (that's what "open" means). Flip `verified` to true or delete
-spam from the Supabase Table Editor.
+**Moderation/security:** public visitors can read public marketplace data, but direct anon-key
+inserts are blocked. The app performs public submissions server-side with the `service_role` key
+after validation and session rate limits.
 
 ### Delivering the leads (customer → rep)
 When a customer hits **Request an intro** on a rep card, they submit their name + email/phone +
 a short message. That lead is:
 
-1. **Saved to Supabase** (`leads` table — created by the same `supabase_setup.sql`). The table is
-   **insert-only for the public key and has no read policy**, so customer contact details are
-   never exposed through the public API.
+1. **Saved to Supabase** (`leads` table — created by the same `supabase_setup.sql`) by the
+   server-side app. The table has **no public read or write policy**, so customer contact details
+   are never exposed through the public API.
 2. **Emailed to the rep** via **Resend over SMTP** (reusing the `hsfinest.ai` verified domain),
    with `Reply-To` set to the customer so the rep can reply directly. Configure under `[smtp]` in
    secrets — only the Resend API key (`password`) and a `from` address are required.
@@ -60,14 +67,13 @@ to see their leads. Because leads aren't publicly readable, this requires the Su
 **service_role** key (`[supabase].service_key`) — a server-side secret that never reaches the
 browser. Without it, leads are still saved and emailed; only the in-app inbox is hidden.
 
-Each piece degrades gracefully: no email secret → leads are still saved; no Supabase → the request
-is logged for the session (demo). So the app never errors, it just does as much as it's configured
-to do.
+Each piece degrades gracefully: no email secret → leads are still saved; no service key → live
+submissions are read-only; no Supabase → the request is logged for the session (demo).
 
 ### Ratings, reviews, and rep listing management
-- **Reviews:** customers leave a 1–5 review on a rep card. Once a rep has reviews, their displayed
-  rating and best-match score use the **real review average** instead of the seeded value.
-  (`reviews` table — public read + insert.)
+- **Verified reviews:** customers receive a one-time review token after requesting an intro.
+  Live reviews require that token, are marked `verified`, and only verified reviews affect the
+  displayed rating and best-match score.
 - **Trust & safety at sign-up:** listings are checked for a valid email, blocked words, links in
   the name/company, length limits, and duplicates (same company + email); sign-ups are rate-limited
   per session.
@@ -78,7 +84,7 @@ to do.
   when that key is set.
 
 Re-run `supabase_setup.sql` after updating — it adds the `reviews` table and the `edit_code_hash` /
-`active` columns to `reps` (idempotent `if not exists` / `add column if not exists`).
+`active`, sample, service-area, verified-review, and pipeline columns (idempotent where possible).
 
 ## Rep side — what it does
 - Search any US metro (presets) or type any city (geocoded via OSM Nominatim).
@@ -91,7 +97,8 @@ Re-run `supabase_setup.sql` after updating — it adds the `reviews` table and t
   - Independent (not a chain) → a real local decision-maker (+15)
 - Map view (pydeck) + summary metrics (hot leads, presence gaps, avg score).
 - **Pipeline**: move prospects through New → Contacted → Qualified → Won / Passed, add
-  call notes. Export/import the pipeline as CSV to keep it (session state is per-browser).
+  call notes and next follow-up dates. With Supabase `service_key`, reps can sync a private
+  pipeline using their email + pipeline code; CSV export/import still works.
 
 ## Run locally
 ```bash

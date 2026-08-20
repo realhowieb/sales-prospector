@@ -7,8 +7,6 @@ Pipeline stages & notes live in the browser session; export/import as CSV to kee
 """
 from __future__ import annotations
 
-import hashlib
-import html
 import io
 import re
 import secrets
@@ -16,10 +14,24 @@ import smtplib
 import time
 from datetime import date, datetime
 from email.message import EmailMessage
+from urllib.parse import urlencode
 
 import pandas as pd
 import requests
 import streamlit as st
+
+from prospecting_core import (
+    PRODUCT_PROFILES,
+    bbox_center,
+    build_pipeline_payload,
+    escape_html as h,
+    hash_code as _hash_code,
+    heat_of,
+    lead_score,
+    miles_between,
+    normalize_owner_email,
+    sales_insight,
+)
 
 # pydeck ships with streamlit, but guard the import so a stale-module deploy
 # degrades to the list view instead of crashing the whole app.
@@ -89,44 +101,6 @@ STAGES = ["— none —", "New lead", "Contacted", "Qualified", "Won", "Passed"]
 STAGE_COLORS = {
     "New lead": "#8A9993", "Contacted": "#2E6C8C", "Qualified": "#B67A1E",
     "Won": "#3E7C64", "Passed": "#C6432A",
-}
-
-PRODUCT_PROFILES: dict[str, dict] = {
-    "Marketing/Web": {
-        "weights": {"phone": 35, "no_website": 35, "address": 15, "independent": 15},
-        "fit_categories": set(CATEGORIES),
-        "angle": "presence gap and direct-response conversation",
-    },
-    "Security/ADT": {
-        "weights": {"phone": 30, "no_website": 5, "address": 30, "independent": 25},
-        "fit_categories": {"Restaurant & Café", "Retail Boutique", "Beauty & Spa", "Auto Services", "Fitness & Gym"},
-        "fit_bonus": 10,
-        "angle": "in-person security/CCTV conversation",
-    },
-    "POS": {
-        "weights": {"phone": 25, "no_website": 10, "address": 25, "independent": 25},
-        "fit_categories": {"Restaurant & Café", "Retail Boutique", "Beauty & Spa", "Auto Services"},
-        "fit_bonus": 15,
-        "angle": "checkout, payments, and hardware conversation",
-    },
-    "Payroll/HR": {
-        "weights": {"phone": 30, "no_website": 5, "address": 10, "independent": 20},
-        "fit_categories": {"Medical & Dental", "Professional Svcs", "Fitness & Gym", "Restaurant & Café"},
-        "fit_bonus": 20,
-        "angle": "small-team payroll and HR compliance conversation",
-    },
-    "Insurance": {
-        "weights": {"phone": 25, "no_website": 5, "address": 20, "independent": 20},
-        "fit_categories": {"Auto Services", "Home Services", "Professional Svcs", "Medical & Dental"},
-        "fit_bonus": 15,
-        "angle": "commercial coverage and risk review",
-    },
-    "Merchant Services": {
-        "weights": {"phone": 30, "no_website": 10, "address": 20, "independent": 25},
-        "fit_categories": {"Restaurant & Café", "Retail Boutique", "Beauty & Spa", "Fitness & Gym"},
-        "fit_bonus": 15,
-        "angle": "payment processing and fee-savings conversation",
-    },
 }
 
 OVERPASS_ENDPOINTS = [
@@ -212,58 +186,6 @@ def which_category(tags: dict) -> str | None:
     return None
 
 
-def h(value) -> str:
-    return html.escape("" if value is None else str(value), quote=True)
-
-
-def lead_score(row: dict, profile_name: str = "Marketing/Web") -> tuple[int, list[str]]:
-    """
-    Transparent score from *real* listing signals a rep can act on:
-      + reachable (has phone)            35
-      + opportunity (NO website)         35   <- the classic "needs a web/marketing presence" angle
-      + locatable for a visit (address)  15
-      + independent (not a chain)        15
-    """
-    profile = PRODUCT_PROFILES.get(profile_name, PRODUCT_PROFILES["Marketing/Web"])
-    weights = profile["weights"]
-    score, why = 0, []
-    if row["phone"]:
-        points = weights["phone"]
-        score += points; why.append(f"Has phone (reachable) +{points}")
-    else:
-        why.append("No phone listed")
-    if not row["website"]:
-        points = weights["no_website"]
-        score += points; why.append(f"No website +{points}")
-    else:
-        why.append("Already has a website")
-    if row["address"]:
-        points = weights["address"]
-        score += points; why.append(f"Street address (visitable) +{points}")
-    if row["independent"]:
-        points = weights["independent"]
-        score += points; why.append(f"Independent, not a chain +{points}")
-    else:
-        why.append("Looks like a chain/brand")
-    if row["category"] in profile.get("fit_categories", set()):
-        points = profile.get("fit_bonus", 0)
-        if points:
-            score += points; why.append(f"Good category fit for {profile_name} +{points}")
-    return min(score, 100), why
-
-
-def sales_insight(row: dict, profile_name: str = "Marketing/Web") -> str:
-    profile = PRODUCT_PROFILES.get(profile_name, PRODUCT_PROFILES["Marketing/Web"])
-    ownership = "local independent" if row["independent"] else "known brand or chain"
-    access = "direct phone access" if row["phone"] else "no listed phone"
-    place = "a physical storefront" if row["address"] else "limited address detail"
-    website = "no visible website" if not row["website"] else "an existing website"
-    return (
-        f"Recommended approach: {ownership} {row['category'].lower()} with {access}, "
-        f"{place}, and {website}. Good candidate for a {profile['angle']}."
-    )
-
-
 def score_prospects(df: pd.DataFrame, profile_name: str) -> pd.DataFrame:
     if df.empty:
         return df
@@ -275,11 +197,6 @@ def score_prospects(df: pd.DataFrame, profile_name: str) -> pd.DataFrame:
         scored.at[idx, "why"] = " · ".join(why)
         scored.at[idx, "insight"] = sales_insight(row, profile_name)
     return scored.sort_values("score", ascending=False).reset_index(drop=True)
-
-
-def heat_of(score: int) -> str:
-    return "Hot" if score >= 66 else "Warm" if score >= 40 else "Cool"
-
 
 def parse_elements(elements: list[dict], profile_name: str = "Marketing/Web") -> pd.DataFrame:
     rows = []
@@ -355,10 +272,6 @@ def set_follow_up(bid: str, next_follow_up: str, name: str, cat: str):
     entry["next_follow_up"] = next_follow_up
 
 
-def normalize_owner_email(email: str) -> str:
-    return (email or "").strip().lower()
-
-
 # --------------------------------------------------------------------------- #
 # Rep marketplace (customer side)
 # --------------------------------------------------------------------------- #
@@ -414,11 +327,14 @@ try:
     SUPABASE_SERVICE_KEY = st.secrets["supabase"]["service_key"] or None
 except Exception:
     SUPABASE_SERVICE_KEY = None
+LIVE_WRITES_ON = bool(SUPABASE_ON and SUPABASE_SERVICE_KEY)
 REP_FIELDS = ["name", "company", "categories", "metros", "deal", "deal_strength",
               "rating", "reviews", "response", "verified", "blurb", "email", "phone",
-              "edit_code_hash", "active", "is_sample"]
+              "edit_code_hash", "active", "is_sample", "service_area", "service_lat",
+              "service_lon", "service_radius_miles"]
 LEAD_FIELDS = ["rep_id", "rep_company", "rep_email", "customer_name",
-               "customer_email", "customer_phone", "message", "category", "metro"]
+               "customer_email", "customer_phone", "message", "category", "metro",
+               "review_token_hash"]
 def _email_cfg():
     """Resend-over-SMTP config from secrets. Only `password` (Resend key) + `from` required."""
     try:
@@ -434,6 +350,13 @@ def _email_cfg():
 
 EMAIL_CFG = _email_cfg()
 EMAIL_ON = EMAIL_CFG is not None
+
+
+def _app_base_url() -> str:
+    try:
+        return (st.secrets["app"]["base_url"] or "").rstrip("/")
+    except Exception:
+        return ""
 
 
 def _sb_headers(extra: dict | None = None) -> dict:
@@ -453,8 +376,8 @@ def _sb_check(r):
                     "supabase_setup.sql (it creates BOTH the `reps` and `leads` tables), then "
                     "retry. Also confirm the `url` secret is your Project URL.")
         elif r.status_code in (401, 403):
-            hint = (" — check the anon key, and that the RLS read/insert policies from "
-                    "supabase_setup.sql exist on the table.")
+            hint = (" — check the configured Supabase key and the RLS policies from "
+                    "supabase_setup.sql. Public writes now require the service_role key.")
         raise RuntimeError(f"Supabase {r.status_code}: {r.text[:300]}{hint}")
 
 
@@ -474,15 +397,16 @@ def fetch_reps_db() -> list[dict]:
         row["rating"] = row.get("rating") or 0.0
         row["reviews"] = row.get("reviews") or 0
         row["is_sample"] = bool(row.get("is_sample", False))
+        row["service_radius_miles"] = row.get("service_radius_miles") or 25
     return rows
 
 
 def insert_reps_db(reps: list[dict]):
-    """Insert one or more listings into the shared table, then bust the cache."""
+    """Insert one or more listings through the server-side service role, then bust the cache."""
     payload = [{k: rep.get(k) for k in REP_FIELDS} for rep in reps]
     r = requests.post(
         f"{SUPABASE_URL}/rest/v1/reps",
-        headers=_sb_headers({"Prefer": "return=minimal"}), json=payload, timeout=20,
+        headers=_sb_service_headers({"Prefer": "return=minimal"}), json=payload, timeout=20,
     )
     _sb_check(r)
     fetch_reps_db.clear()
@@ -501,6 +425,8 @@ def all_reps() -> list[dict]:
 
 # ---- Leads: capture customer requests, notify the rep --------------------- #
 def _sb_service_headers(extra: dict | None = None) -> dict:
+    if not SUPABASE_SERVICE_KEY:
+        raise RuntimeError("Live writes need `[supabase].service_key` configured.")
     h = {"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
          "Content-Type": "application/json"}
     if extra:
@@ -509,11 +435,13 @@ def _sb_service_headers(extra: dict | None = None) -> dict:
 
 
 def insert_lead_db(lead: dict):
-    """Save a lead to Supabase. Uses the anon key (insert-only policy — not publicly readable)."""
+    """Save a lead to Supabase through the server-side service role."""
     r = requests.post(f"{SUPABASE_URL}/rest/v1/leads",
-                      headers=_sb_headers({"Prefer": "return=minimal"}),
+                      headers=_sb_service_headers({"Prefer": "return=representation"}),
                       json={k: lead.get(k) for k in LEAD_FIELDS}, timeout=20)
     _sb_check(r)
+    rows = r.json()
+    return rows[0] if rows else {}
 
 
 def fetch_leads_db(rep_email: str) -> list[dict]:
@@ -525,38 +453,28 @@ def fetch_leads_db(rep_email: str) -> list[dict]:
     return r.json()
 
 
-def fetch_pipeline_db(owner_email: str) -> list[dict]:
+def fetch_pipeline_db(owner_email: str, owner_key_hash: str) -> list[dict]:
     """Read a rep's private pipeline. Requires the service_role key."""
     r = requests.get(
         f"{SUPABASE_URL}/rest/v1/pipeline_entries",
         headers=_sb_service_headers(),
-        params={"select": "*", "owner_email": f"eq.{owner_email}", "order": "updated_at.desc"},
+        params={"select": "*", "owner_email": f"eq.{owner_email}",
+                "owner_key_hash": f"eq.{owner_key_hash}", "order": "updated_at.desc"},
         timeout=20,
     )
     _sb_check(r)
     return r.json()
 
 
-def save_pipeline_db(owner_email: str, entries: dict):
+def save_pipeline_db(owner_email: str, owner_key_hash: str, entries: dict):
     """Upsert pipeline rows for one rep. Requires a unique(owner_email, prospect_id) index."""
-    payload = []
-    for prospect_id, entry in entries.items():
-        payload.append({
-            "owner_email": owner_email,
-            "prospect_id": str(prospect_id),
-            "name": entry.get("name", ""),
-            "category": entry.get("category", ""),
-            "stage": entry.get("stage", "New lead"),
-            "note": entry.get("note", ""),
-            "next_follow_up": entry.get("next_follow_up") or None,
-            "outcome": entry.get("outcome", ""),
-        })
+    payload = build_pipeline_payload(owner_email, owner_key_hash, entries)
     if not payload:
         return
     r = requests.post(
         f"{SUPABASE_URL}/rest/v1/pipeline_entries",
         headers=_sb_service_headers({"Prefer": "resolution=merge-duplicates,return=minimal"}),
-        params={"on_conflict": "owner_email,prospect_id"},
+        params={"on_conflict": "owner_email,owner_key_hash,prospect_id"},
         json=payload,
         timeout=20,
     )
@@ -594,17 +512,48 @@ def send_lead_email(rep: dict, lead: dict) -> bool:
     return True
 
 
+def send_review_link_email(to: str, rep: dict, review_link: str) -> bool:
+    if not EMAIL_ON or "@" not in (to or "") or not review_link:
+        return False
+    msg = EmailMessage()
+    msg["Subject"] = f"Review your intro to {rep['company']}"
+    msg["From"] = EMAIL_CFG["from"]
+    msg["To"] = to
+    msg.set_content("\n".join([
+        f"Thanks for requesting an intro to {rep['company']}.",
+        "",
+        "After you've connected, you can leave one verified review here:",
+        review_link,
+        "",
+        "This one-time link helps keep marketplace ratings tied to real requests.",
+    ]))
+    with smtplib.SMTP(EMAIL_CFG["host"], EMAIL_CFG["port"], timeout=20) as s:
+        s.starttls()
+        s.login(EMAIL_CFG["user"], EMAIL_CFG["password"])
+        s.send_message(msg)
+    return True
+
+
+def make_review_link(token: str) -> str:
+    base = _app_base_url()
+    if not base:
+        return ""
+    return f"{base}?{urlencode({'review_token': token})}"
+
+
 def submit_lead(rep: dict, name: str, email: str, phone: str, message: str):
+    review_token = secrets.token_urlsafe(24)
     lead = {
         "rep_id": str(rep.get("id", "")), "rep_company": rep.get("company", ""),
         "rep_email": rep.get("email", ""), "customer_name": name,
         "customer_email": email, "customer_phone": phone, "message": message,
         "category": "" if cust_category == "Any category" else cust_category,
         "metro": "" if cust_metro == "Anywhere" else cust_metro,
+        "review_token_hash": _hash_code(review_token),
     }
-    saved = emailed = False
+    saved = emailed = review_emailed = False
     err = None
-    if SUPABASE_ON:
+    if LIVE_WRITES_ON:
         try:
             insert_lead_db(lead)
             saved = True
@@ -612,6 +561,10 @@ def submit_lead(rep: dict, name: str, email: str, phone: str, message: str):
             err = str(exc)
     try:
         emailed = send_lead_email(rep, lead)
+    except Exception as exc:
+        err = err or str(exc)
+    try:
+        review_emailed = send_review_link_email(email, rep, make_review_link(review_token))
     except Exception as exc:
         err = err or str(exc)
     st.session_state.setdefault("intro_requests", []).append(
@@ -625,6 +578,8 @@ def submit_lead(rep: dict, name: str, email: str, phone: str, message: str):
         st.info(f"Request logged for {rep['company']} (demo mode — add Supabase/email secrets to deliver it).")
     if err and not (saved or emailed):
         st.caption(f"Delivery note: {err}")
+    if saved and not review_emailed:
+        st.caption("Verified review token created. Configure `[app].base_url` and SMTP to email review links automatically.")
 
 
 # ---- Ratings & reviews ---------------------------------------------------- #
@@ -649,6 +604,8 @@ def reviews_summary(reviews: list[dict]) -> dict:
     """rep_id -> {avg, count, recent[]}."""
     agg: dict = {}
     for rv in reviews:
+        if rv.get("verified") is False:
+            continue
         rid = str(rv.get("rep_id", ""))
         a = agg.setdefault(rid, {"sum": 0, "count": 0, "recent": []})
         try:
@@ -671,26 +628,58 @@ def effective_rating(rep: dict, summary: dict):
     return float(rep.get("rating", 0) or 0), int(rep.get("reviews", 0) or 0), False
 
 
-def insert_review(rep: dict, rating: int, name: str, comment: str):
+def fetch_review_lead(token: str) -> dict | None:
+    token_hash = _hash_code(token)
+    r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/leads",
+        headers=_sb_service_headers(),
+        params={"select": "id,rep_id,customer_name,review_token_used_at",
+                "review_token_hash": f"eq.{token_hash}", "limit": 1},
+        timeout=20,
+    )
+    _sb_check(r)
+    rows = r.json()
+    return rows[0] if rows else None
+
+
+def mark_review_token_used(lead_id):
+    r = requests.patch(
+        f"{SUPABASE_URL}/rest/v1/leads?id=eq.{lead_id}",
+        headers=_sb_service_headers({"Prefer": "return=minimal"}),
+        json={"review_token_used_at": datetime.utcnow().isoformat()},
+        timeout=20,
+    )
+    _sb_check(r)
+
+
+def insert_review(rep: dict, rating: int, name: str, comment: str, token: str = ""):
     rec = {"rep_id": str(rep.get("id", "")), "rating": int(rating),
-           "customer_name": name or "Anonymous", "comment": comment or ""}
-    if SUPABASE_ON:
+           "customer_name": name or "Anonymous", "comment": comment or "",
+           "verified": False}
+    if LIVE_WRITES_ON:
+        lead = fetch_review_lead(token)
+        if not lead:
+            raise RuntimeError("That review link is invalid.")
+        if lead.get("review_token_used_at"):
+            raise RuntimeError("That review link has already been used.")
+        if str(lead.get("rep_id")) != str(rep.get("id", "")):
+            raise RuntimeError("That review link is for a different rep.")
+        rec["lead_id"] = lead.get("id")
+        rec["verified"] = True
         r = requests.post(f"{SUPABASE_URL}/rest/v1/reviews",
-                          headers=_sb_headers({"Prefer": "return=minimal"}),
+                          headers=_sb_service_headers({"Prefer": "return=minimal"}),
                           json=rec, timeout=20)
         _sb_check(r)
+        mark_review_token_used(lead.get("id"))
         fetch_reviews_db.clear()
     else:
+        rec["verified"] = True
         st.session_state.setdefault("session_reviews", []).append(rec)
 
 
 # ---- Rep identity, trust & safety, listing management --------------------- #
 BANNED_WORDS = {"viagra", "casino", "porn", "xxx", "escort", "loan shark", "bitcoin doubler"}
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-
-
-def _hash_code(code: str) -> str:
-    return hashlib.sha256(code.strip().encode()).hexdigest()
 
 
 def validate_listing(name, company, email, deal, blurb, existing) -> str | None:
@@ -770,6 +759,8 @@ def rep_score(rep: dict, rating: float | None = None) -> int:
 # --------------------------------------------------------------------------- #
 st.set_page_config(page_title=APP_TITLE, page_icon="📍", layout="wide")
 
+review_token_from_url = st.query_params.get("review_token", "")
+
 st.markdown(
     """
     <style>
@@ -847,10 +838,19 @@ with st.sidebar:
             help="Used to load/save your private Supabase pipeline when service_role is configured.",
         )
         st.session_state["pipeline_owner_email"] = pipeline_owner_email
+        pipeline_access_code = st.text_input(
+            "Pipeline code",
+            value=st.session_state.get("pipeline_access_code", ""),
+            type="password",
+            help="Use the same private code every time you load or save this pipeline.",
+        )
+        st.session_state["pipeline_access_code"] = pipeline_access_code
     else:
         st.header("What do you need?")
         cust_category = st.selectbox("I'm looking for", ["Any category"] + list(CATEGORIES.keys()))
         cust_metro = st.selectbox("My area", ["Anywhere"] + list(METROS.keys()))
+        cust_area = st.text_input("…or city / ZIP + radius", placeholder="e.g. 95117 or Palo Alto, CA")
+        cust_radius = st.slider("Search radius", 5, 100, 25, step=5)
         cust_min_rating = st.slider("Minimum rating", 0.0, 5.0, 0.0, step=0.5)
         cust_sort = st.selectbox("Rank by", ["Best match", "Best deal", "Top rated", "Fastest response"])
 
@@ -901,7 +901,8 @@ def rep_card(rep: dict, score: int, rating: float, rcount: int, real: bool, rece
                         st.error("Add your name and an email or phone so the rep can reply.")
                     else:
                         submit_lead(rep, ln.strip(), le.strip(), lp.strip(), lm.strip())
-            with st.expander(f"⭐ Reviews ({rcount}) · leave a review"):
+            review_label = f"⭐ Verified reviews ({rcount}) · leave a review"
+            with st.expander(review_label):
                 if recent:
                     for rv in recent:
                         rn_ = int(rv.get("rating", 0) or 0)
@@ -917,10 +918,21 @@ def rep_card(rep: dict, score: int, rating: float, rcount: int, real: bool, rece
                     rr = st.slider("Your rating", 1, 5, 5, key=f"rr_{rep['id']}")
                     rn = st.text_input("Your name", key=f"rn_{rep['id']}")
                     rc = st.text_area("Comment (optional)", key=f"rc_{rep['id']}")
+                    rt = ""
+                    if LIVE_WRITES_ON:
+                        rt = st.text_input(
+                            "Verified review token",
+                            value=review_token_from_url,
+                            key=f"rt_{rep['id']}",
+                            help="Customers receive a one-time token after requesting an intro.",
+                        )
                     rsent = st.form_submit_button("Submit review")
                 if rsent:
                     try:
-                        insert_review(rep, rr, rn.strip(), rc.strip())
+                        if LIVE_WRITES_ON and not rt.strip():
+                            st.error("Use the verified review link from your intro request email.")
+                            st.stop()
+                        insert_review(rep, rr, rn.strip(), rc.strip(), rt.strip())
                         st.success("Thanks — your review is in.")
                         st.rerun()
                     except Exception as exc:
@@ -934,16 +946,38 @@ def rep_card(rep: dict, score: int, rating: float, rcount: int, real: bool, rece
         st.markdown("</div>", unsafe_allow_html=True)
 
 
+def rep_matches_customer_area(rep: dict, customer_center: tuple[float, float] | None) -> bool:
+    if customer_center:
+        try:
+            rep_lat = float(rep.get("service_lat"))
+            rep_lon = float(rep.get("service_lon"))
+            rep_radius = float(rep.get("service_radius_miles") or 25)
+            distance = miles_between(customer_center[0], customer_center[1], rep_lat, rep_lon)
+            return distance <= rep_radius + cust_radius
+        except (TypeError, ValueError):
+            return False
+    return cust_metro == "Anywhere" or cust_metro in rep["metros"]
+
+
 def render_marketplace():
     roster = all_reps()
     summary = reviews_summary(all_reviews())
+    customer_center = None
+    customer_area_label = cust_metro
+    if cust_area.strip():
+        bbox = geocode_area(cust_area.strip())
+        customer_area_label = f"{cust_area.strip()} + {cust_radius} miles"
+        if bbox:
+            customer_center = bbox_center(bbox)
+        else:
+            st.warning(f"Couldn't locate {cust_area.strip()}. Showing metro/anywhere matches instead.")
     matched = []
     for rep in roster:
         if rep.get("active", True) is False:   # paused listings hidden from customers
             continue
         if cust_category != "Any category" and cust_category not in rep["categories"]:
             continue
-        if cust_metro != "Anywhere" and cust_metro not in rep["metros"]:
+        if not rep_matches_customer_area(rep, customer_center):
             continue
         rating, rcount, real = effective_rating(rep, summary)
         if rating < cust_min_rating:
@@ -961,16 +995,18 @@ def render_marketplace():
         matched.sort(key=lambda x: x[1], reverse=True)
 
     want = "any service" if cust_category == "Any category" else cust_category
-    where = "any area" if cust_metro == "Anywhere" else cust_metro
+    where = "any area" if customer_area_label == "Anywhere" else customer_area_label
     st.caption("🟢 Live marketplace — reps below are shared database listings. Sample listings are labeled."
                if SUPABASE_ON else
                "🟡 Demo mode — sample reps + this-browser listings. Connect Supabase to go live (see README).")
+    if SUPABASE_ON and not SUPABASE_SERVICE_KEY:
+        st.warning("Live marketplace is read-only until `[supabase].service_key` is configured for server-side submissions.")
     st.subheader(f"{len(matched)} reps competing for your business · {want} · {where}")
 
     if SUPABASE_ON and not roster:
         st.info("The live marketplace has no reps yet. Be the first to list yourself below — "
                 "or load a sample roster to explore the experience.")
-        if st.button("Load 16 sample reps into the marketplace"):
+        if st.button("Load 16 sample reps into the marketplace", disabled=not LIVE_WRITES_ON):
             try:
                 insert_reps_db(REPS_SEED)
                 st.success("Sample roster loaded into the shared marketplace.")
@@ -1007,6 +1043,8 @@ def render_marketplace():
             f_company = colB.text_input("Company")
             f_cats = st.multiselect("Categories you serve", list(CATEGORIES.keys()))
             f_metros = st.multiselect("Territories you cover", list(METROS.keys()))
+            f_service_area = st.text_input("Service-area center", placeholder="e.g. 95117 or Palo Alto, CA")
+            f_service_radius = st.slider("Service radius (miles)", 5, 150, 25, step=5)
             f_deal = st.text_input("Your headline deal", placeholder="e.g. 20% off first order")
             f_strength = st.slider("How strong is this offer?", 0.0, 1.0, 0.5, step=0.05,
                                    help="Ranks you on 'best deal'. 1.0 = a standout offer.")
@@ -1017,8 +1055,10 @@ def render_marketplace():
             f_phone = colD.text_input("Contact phone")
             submitted = st.form_submit_button("➕ Add my listing")
         if submitted:
-            if not (f_name and f_company and f_cats and f_metros and f_deal and f_email):
-                st.error("Fill name, company, email, at least one category & territory, and your deal.")
+            if SUPABASE_ON and not LIVE_WRITES_ON:
+                st.error("Live listing submissions need `[supabase].service_key` configured.")
+            elif not (f_name and f_company and f_cats and (f_metros or f_service_area) and f_deal and f_email):
+                st.error("Fill name, company, email, at least one category, a territory or service-area center, and your deal.")
             elif rate_limited():
                 st.error("You've added several listings this session. Please try again later.")
             else:
@@ -1027,12 +1067,21 @@ def render_marketplace():
                     st.error(verr)
                 else:
                     code = secrets.token_hex(4)
+                    service_lat = service_lon = None
+                    if f_service_area.strip():
+                        service_bbox = geocode_area(f_service_area.strip())
+                        if service_bbox is None:
+                            st.error("Couldn't locate that service-area center. Try a city + state or ZIP.")
+                            st.stop()
+                        service_lat, service_lon = bbox_center(service_bbox)
                     new_rep = {
                         "name": f_name, "company": f_company, "categories": f_cats,
                         "metros": f_metros, "deal": f_deal, "deal_strength": f_strength,
                         "rating": 0.0, "reviews": 0, "response": f_resp, "verified": False,
                         "blurb": f_blurb or "New rep listing.", "email": f_email, "phone": f_phone or "—",
                         "active": True, "is_sample": False,
+                        "service_area": f_service_area.strip(), "service_lat": service_lat,
+                        "service_lon": service_lon, "service_radius_miles": f_service_radius,
                     }
                     if SUPABASE_ON:
                         new_rep["edit_code_hash"] = _hash_code(code)
@@ -1096,13 +1145,29 @@ def render_marketplace():
                                         default=[c for c in mrep.get("categories", []) if c in CATEGORIES], key="ed_cats")
                 e_metros = st.multiselect("Territories", list(METROS.keys()),
                                           default=[m for m in mrep.get("metros", []) if m in METROS], key="ed_metros")
+                e_service_area = st.text_input("Service-area center", value=mrep.get("service_area", "") or "", key="ed_service_area")
+                e_service_radius = st.slider("Service radius (miles)", 5, 150,
+                                             int(mrep.get("service_radius_miles", 25) or 25),
+                                             step=5, key="ed_service_radius")
                 e_blurb = st.text_input("Description", value=mrep.get("blurb", ""), key="ed_blurb")
                 b1, b2, b3 = st.columns(3)
                 if b1.button("💾 Save changes"):
                     try:
+                        service_lat = mrep.get("service_lat")
+                        service_lon = mrep.get("service_lon")
+                        if e_service_area.strip() and e_service_area.strip() != (mrep.get("service_area") or ""):
+                            service_bbox = geocode_area(e_service_area.strip())
+                            if service_bbox is None:
+                                st.error("Couldn't locate that service-area center. Try a city + state or ZIP.")
+                                st.stop()
+                            service_lat, service_lon = bbox_center(service_bbox)
                         update_rep_db(mrep["id"], {"deal": e_deal, "deal_strength": e_str,
                                                    "response": e_resp, "categories": e_cats,
-                                                   "metros": e_metros, "blurb": e_blurb})
+                                                   "metros": e_metros, "blurb": e_blurb,
+                                                   "service_area": e_service_area.strip(),
+                                                   "service_lat": service_lat,
+                                                   "service_lon": service_lon,
+                                                   "service_radius_miles": e_service_radius})
                         st.session_state.pop("managing", None)
                         st.success("Saved.")
                         st.rerun()
@@ -1326,13 +1391,15 @@ with tab_discover:
 with tab_pipeline:
     p = pipe()
     owner_email = normalize_owner_email(st.session_state.get("pipeline_owner_email", ""))
-    sync_ready = bool(SUPABASE_ON and SUPABASE_SERVICE_KEY and owner_email)
+    owner_code = st.session_state.get("pipeline_access_code", "")
+    owner_key_hash = _hash_code(owner_code) if owner_code else ""
+    sync_ready = bool(LIVE_WRITES_ON and owner_email and owner_key_hash)
     if SUPABASE_ON and SUPABASE_SERVICE_KEY:
         s1, s2, s3 = st.columns([2, 1, 1])
-        s1.caption("Supabase pipeline sync is private to the rep email in the sidebar.")
-        if s2.button("Load pipeline", use_container_width=True, disabled=not owner_email):
+        s1.caption("Supabase pipeline sync uses the rep email + private pipeline code in the sidebar.")
+        if s2.button("Load pipeline", use_container_width=True, disabled=not sync_ready):
             try:
-                rows = fetch_pipeline_db(owner_email)
+                rows = fetch_pipeline_db(owner_email, owner_key_hash)
                 st.session_state["pipe"] = {
                     str(r["prospect_id"]): {
                         "name": r.get("name", ""),
@@ -1350,7 +1417,7 @@ with tab_pipeline:
                 st.error(f"Couldn't load pipeline: {exc}")
         if s3.button("Save pipeline", use_container_width=True, disabled=not sync_ready or not p):
             try:
-                save_pipeline_db(owner_email, p)
+                save_pipeline_db(owner_email, owner_key_hash, p)
                 st.success("Pipeline saved.")
             except Exception as exc:
                 st.error(f"Couldn't save pipeline: {exc}")
