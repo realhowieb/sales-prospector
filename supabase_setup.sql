@@ -22,10 +22,17 @@ create table if not exists reps (
 -- Row Level Security: allow the public (anon key) to READ and INSERT listings,
 -- but NOT update or delete. That's exactly what an open marketplace needs, and
 -- it means the anon key is safe to ship in the app's secrets.
+-- If you created `reps` before rep management existed, add the new columns:
+alter table reps add column if not exists edit_code_hash text;
+alter table reps add column if not exists active boolean default true;
+
 alter table reps enable row level security;
 
 create policy "public read reps"   on reps for select using (true);
 create policy "public insert reps" on reps for insert with check (true);
+-- Edit / pause / delete are performed by the app with the service_role key
+-- (which bypasses RLS) after verifying the rep's edit code — so no public
+-- update/delete policy is granted here.
 
 -- Note: no update/delete policies are created, so those are denied by default.
 -- Moderation (e.g. flipping `verified` to true, removing spam) is done by you

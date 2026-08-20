@@ -64,6 +64,22 @@ Each piece degrades gracefully: no email secret → leads are still saved; no Su
 is logged for the session (demo). So the app never errors, it just does as much as it's configured
 to do.
 
+### Ratings, reviews, and rep listing management
+- **Reviews:** customers leave a 1–5 review on a rep card. Once a rep has reviews, their displayed
+  rating and best-match score use the **real review average** instead of the seeded value.
+  (`reviews` table — public read + insert.)
+- **Trust & safety at sign-up:** listings are checked for a valid email, blocked words, links in
+  the name/company, length limits, and duplicates (same company + email); sign-ups are rate-limited
+  per session.
+- **Rep listing management:** each new listing gets an **edit code** (shown once + emailed; only a
+  SHA-256 hash is stored). Under **Manage your listing**, a rep enters their email + code to
+  **edit, pause, or delete** their listing. Pausing hides it from customers. These writes use the
+  Supabase **service_role** key (`[supabase].service_key`), so the management panel only appears
+  when that key is set.
+
+Re-run `supabase_setup.sql` after updating — it adds the `reviews` table and the `edit_code_hash` /
+`active` columns to `reps` (idempotent `if not exists` / `add column if not exists`).
+
 ## Rep side — what it does
 - Search any US metro (presets) or type any city (geocoded via OSM Nominatim).
 - Pull real businesses in 8 categories (restaurants, fitness, auto, home services,

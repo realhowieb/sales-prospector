@@ -7,7 +7,10 @@ Pipeline stages & notes live in the browser session; export/import as CSV to kee
 """
 from __future__ import annotations
 
+import hashlib
 import io
+import re
+import secrets
 import smtplib
 import time
 from datetime import datetime
@@ -320,7 +323,8 @@ try:
 except Exception:
     SUPABASE_SERVICE_KEY = None
 REP_FIELDS = ["name", "company", "categories", "metros", "deal", "deal_strength",
-              "rating", "reviews", "response", "verified", "blurb", "email", "phone"]
+              "rating", "reviews", "response", "verified", "blurb", "email", "phone",
+              "edit_code_hash", "active"]
 LEAD_FIELDS = ["rep_id", "rep_company", "rep_email", "customer_name",
                "customer_email", "customer_phone", "message", "category", "metro"]
 
@@ -405,9 +409,12 @@ def all_reps() -> list[dict]:
 
 
 # ---- Leads: capture customer requests, notify the rep --------------------- #
-def _sb_service_headers() -> dict:
-    return {"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-            "Content-Type": "application/json"}
+def _sb_service_headers(extra: dict | None = None) -> dict:
+    h = {"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+         "Content-Type": "application/json"}
+    if extra:
+        h.update(extra)
+    return h
 
 
 def insert_lead_db(lead: dict):
@@ -546,6 +553,77 @@ def insert_review(rep: dict, rating: int, name: str, comment: str):
         fetch_reviews_db.clear()
     else:
         st.session_state.setdefault("session_reviews", []).append(rec)
+
+
+# ---- Rep identity, trust & safety, listing management --------------------- #
+BANNED_WORDS = {"viagra", "casino", "porn", "xxx", "escort", "loan shark", "bitcoin doubler"}
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _hash_code(code: str) -> str:
+    return hashlib.sha256(code.strip().encode()).hexdigest()
+
+
+def validate_listing(name, company, email, deal, blurb, existing) -> str | None:
+    """Trust & safety checks at sign-up. Returns an error message, or None if OK."""
+    if not EMAIL_RE.match(email or ""):
+        return "Enter a valid contact email — you'll need it to manage your listing."
+    blob = f"{name} {company} {deal} {blurb}".lower()
+    if any(b in blob for b in BANNED_WORDS):
+        return "Your listing contains blocked words. Please revise it."
+    if re.search(r"https?://|www\.", f"{name} {company}"):
+        return "Please don't put links in your name or company."
+    if len(deal) > 120 or len(blurb) > 200:
+        return "Keep the deal under 120 and the description under 200 characters."
+    ce = (company.strip().lower(), (email or "").strip().lower())
+    for r in existing:
+        if (r.get("company", "").strip().lower(), (r.get("email", "") or "").strip().lower()) == ce:
+            return "A listing with this company and email already exists — use “Manage your listing” to edit it."
+    return None
+
+
+def rate_limited() -> bool:
+    return st.session_state.get("signups_this_session", 0) >= 3
+
+
+def send_edit_code_email(to: str, company: str, code: str) -> bool:
+    if not EMAIL_ON or "@" not in (to or ""):
+        return False
+    msg = EmailMessage()
+    msg["Subject"] = f"Your Find a Rep edit code for {company}"
+    msg["From"] = EMAIL_CFG["from"]
+    msg["To"] = to
+    msg.set_content(
+        f"Thanks for listing {company} on the Find a Rep marketplace.\n\n"
+        f"Your edit code is: {code}\n\n"
+        "Keep it safe — you'll use it (with this email) to edit, pause, or remove your listing.")
+    with smtplib.SMTP(EMAIL_CFG["host"], EMAIL_CFG["port"], timeout=20) as s:
+        s.starttls()
+        s.login(EMAIL_CFG["user"], EMAIL_CFG["password"])
+        s.send_message(msg)
+    return True
+
+
+def find_listings_by_email(email: str) -> list[dict]:
+    r = requests.get(f"{SUPABASE_URL}/rest/v1/reps", headers=_sb_headers(),
+                     params={"select": "*", "email": f"eq.{email}"}, timeout=20)
+    _sb_check(r)
+    return r.json()
+
+
+def update_rep_db(db_id, patch: dict):
+    r = requests.patch(f"{SUPABASE_URL}/rest/v1/reps?id=eq.{db_id}",
+                       headers=_sb_service_headers({"Prefer": "return=minimal"}),
+                       json=patch, timeout=20)
+    _sb_check(r)
+    fetch_reps_db.clear()
+
+
+def delete_rep_db(db_id):
+    r = requests.delete(f"{SUPABASE_URL}/rest/v1/reps?id=eq.{db_id}",
+                        headers=_sb_service_headers(), timeout=20)
+    _sb_check(r)
+    fetch_reps_db.clear()
 
 
 def rep_score(rep: dict, rating: float | None = None) -> int:
@@ -715,6 +793,8 @@ def render_marketplace():
     summary = reviews_summary(all_reviews())
     matched = []
     for rep in roster:
+        if rep.get("active", True) is False:   # paused listings hidden from customers
+            continue
         if cust_category != "Any category" and cust_category not in rep["categories"]:
             continue
         if cust_metro != "Anywhere" and cust_metro not in rep["metros"]:
@@ -766,6 +846,15 @@ def render_marketplace():
 
     st.divider()
     with st.expander("🙋 List yourself as a rep — get found by customers"):
+        code_info = st.session_state.get("new_edit_code")
+        if code_info:
+            st.success(f"✅ {code_info['company']} is listed! Save your edit code below to edit, "
+                       "pause, or remove your listing later"
+                       + (" (also emailed to you)." if code_info.get("emailed") else "."))
+            st.code(code_info["code"], language=None)
+            if st.button("Got it — hide code"):
+                st.session_state.pop("new_edit_code", None)
+                st.rerun()
         with st.form("list_rep", clear_on_submit=True):
             colA, colB = st.columns(2)
             f_name = colA.text_input("Your name")
@@ -776,38 +865,119 @@ def render_marketplace():
             f_strength = st.slider("How strong is this offer?", 0.0, 1.0, 0.5, step=0.05,
                                    help="Ranks you on 'best deal'. 1.0 = a standout offer.")
             f_resp = st.selectbox("Typical response time", RESPONSE_OPTS, index=2)
+            f_blurb = st.text_input("One-line description", placeholder="What you sell, in a sentence")
             colC, colD = st.columns(2)
             f_email = colC.text_input("Contact email")
             f_phone = colD.text_input("Contact phone")
             submitted = st.form_submit_button("➕ Add my listing")
         if submitted:
-            if not (f_name and f_company and f_cats and f_metros and f_deal):
-                st.error("Please fill name, company, at least one category & territory, and your deal.")
+            if not (f_name and f_company and f_cats and f_metros and f_deal and f_email):
+                st.error("Fill name, company, email, at least one category & territory, and your deal.")
+            elif rate_limited():
+                st.error("You've added several listings this session. Please try again later.")
             else:
-                new_rep = {
-                    "name": f_name, "company": f_company, "categories": f_cats,
-                    "metros": f_metros, "deal": f_deal, "deal_strength": f_strength,
-                    "rating": 0.0, "reviews": 0, "response": f_resp, "verified": False,
-                    "blurb": "New rep listing.", "email": f_email or "—", "phone": f_phone or "—",
-                }
-                if SUPABASE_ON:
-                    try:
-                        insert_reps_db([new_rep])
-                        st.success(f"You're listed! {f_company} is now in the live marketplace for every visitor.")
-                        st.rerun()
-                    except Exception as exc:
-                        st.error(f"Couldn't save your listing: {exc}")
+                verr = validate_listing(f_name, f_company, f_email, f_deal, f_blurb, all_reps())
+                if verr:
+                    st.error(verr)
                 else:
-                    mine = st.session_state.setdefault("my_reps", [])
-                    new_rep["id"] = f"me-{len(mine) + 1}"
-                    mine.append(new_rep)
-                    st.success(f"You're listed (demo/session only). Connect Supabase to make {f_company} visible to everyone.")
-                    st.rerun()
+                    code = secrets.token_hex(4)
+                    new_rep = {
+                        "name": f_name, "company": f_company, "categories": f_cats,
+                        "metros": f_metros, "deal": f_deal, "deal_strength": f_strength,
+                        "rating": 0.0, "reviews": 0, "response": f_resp, "verified": False,
+                        "blurb": f_blurb or "New rep listing.", "email": f_email, "phone": f_phone or "—",
+                        "active": True,
+                    }
+                    if SUPABASE_ON:
+                        new_rep["edit_code_hash"] = _hash_code(code)
+                        try:
+                            insert_reps_db([new_rep])
+                            st.session_state["signups_this_session"] = st.session_state.get("signups_this_session", 0) + 1
+                            try:
+                                emailed = send_edit_code_email(f_email, f_company, code)
+                            except Exception:
+                                emailed = False
+                            st.session_state["new_edit_code"] = {"code": code, "company": f_company, "emailed": emailed}
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(f"Couldn't save your listing: {exc}")
+                    else:
+                        mine = st.session_state.setdefault("my_reps", [])
+                        new_rep["id"] = f"me-{len(mine) + 1}"
+                        new_rep["edit_code"] = code
+                        mine.append(new_rep)
+                        st.session_state["signups_this_session"] = st.session_state.get("signups_this_session", 0) + 1
+                        st.session_state["new_edit_code"] = {"code": code, "company": f_company, "emailed": False}
+                        st.rerun()
         st.caption(
             "🟢 Live: new listings save to the shared database and appear for every visitor."
             if SUPABASE_ON else
             "🟡 Demo: listings live in this browser session only. Add Supabase secrets to go live (see README)."
         )
+
+    with st.expander("🔧 Manage your listing (edit / pause / remove)"):
+        if not SUPABASE_ON:
+            st.caption("Listing management needs the live marketplace (Supabase) configured.")
+        elif not SUPABASE_SERVICE_KEY:
+            st.caption("Editing or removing a listing needs a Supabase **service_role** key in "
+                       "secrets (`[supabase].service_key`).")
+        else:
+            mc1, mc2 = st.columns(2)
+            m_email = mc1.text_input("Listing email", key="mng_email")
+            m_code = mc2.text_input("Edit code", key="mng_code", type="password")
+            if st.button("Find my listing") and m_email.strip() and m_code.strip():
+                try:
+                    rows = find_listings_by_email(m_email.strip())
+                    match = [r for r in rows if r.get("edit_code_hash") == _hash_code(m_code)]
+                    if not match:
+                        st.error("No listing found for that email + code.")
+                        st.session_state.pop("managing", None)
+                    else:
+                        st.session_state["managing"] = match[0]
+                except Exception as exc:
+                    st.error(f"Lookup failed: {exc}")
+            mrep = st.session_state.get("managing")
+            if mrep:
+                active = mrep.get("active", True) is not False
+                st.markdown(f"**Editing: {mrep['company']}** — {'🟢 live' if active else '⏸ paused'}")
+                e_deal = st.text_input("Deal", value=mrep.get("deal", ""), key="ed_deal")
+                e_str = st.slider("Offer strength", 0.0, 1.0, float(mrep.get("deal_strength", 0.5) or 0.5),
+                                  step=0.05, key="ed_str")
+                e_resp = st.selectbox("Response time", RESPONSE_OPTS,
+                                      index=RESPONSE_OPTS.index(mrep["response"]) if mrep.get("response") in RESPONSE_OPTS else 2,
+                                      key="ed_resp")
+                e_cats = st.multiselect("Categories", list(CATEGORIES.keys()),
+                                        default=[c for c in mrep.get("categories", []) if c in CATEGORIES], key="ed_cats")
+                e_metros = st.multiselect("Territories", list(METROS.keys()),
+                                          default=[m for m in mrep.get("metros", []) if m in METROS], key="ed_metros")
+                e_blurb = st.text_input("Description", value=mrep.get("blurb", ""), key="ed_blurb")
+                b1, b2, b3 = st.columns(3)
+                if b1.button("💾 Save changes"):
+                    try:
+                        update_rep_db(mrep["id"], {"deal": e_deal, "deal_strength": e_str,
+                                                   "response": e_resp, "categories": e_cats,
+                                                   "metros": e_metros, "blurb": e_blurb})
+                        st.session_state.pop("managing", None)
+                        st.success("Saved.")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Save failed: {exc}")
+                if b2.button("⏸ Pause" if active else "▶️ Reactivate"):
+                    try:
+                        update_rep_db(mrep["id"], {"active": not active})
+                        st.session_state.pop("managing", None)
+                        st.success("Paused." if active else "Reactivated.")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Update failed: {exc}")
+                if b3.button("🗑 Delete"):
+                    try:
+                        delete_rep_db(mrep["id"])
+                        st.session_state.pop("managing", None)
+                        st.success("Listing deleted.")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Delete failed: {exc}")
 
     with st.expander("📥 Are you a listed rep? Check your leads"):
         if not SUPABASE_ON:
