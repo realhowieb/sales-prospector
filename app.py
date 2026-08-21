@@ -166,6 +166,18 @@ def safe_public_url(value: str) -> str:
     return ""
 
 
+def safe_int(value, default: int = 0) -> int:
+    try:
+        if pd.isna(value):
+            return default
+    except TypeError:
+        pass
+    try:
+        return int(float(str(value).strip()))
+    except (TypeError, ValueError):
+        return default
+
+
 def rep_area_match(rep: dict, metro: str, center: tuple[float, float] | None = None) -> bool:
     if not metro:
         return True
@@ -5657,7 +5669,7 @@ with tab_pipeline:
         pdf["note"] = pdf["note"].fillna("")
         pdf["next_follow_up"] = pdf["next_follow_up"].fillna("")
         pdf["last_contacted"] = pdf["last_contacted"].fillna("")
-        pdf["call_attempts"] = pdf["call_attempts"].fillna(0).astype(int)
+        pdf["call_attempts"] = pd.to_numeric(pdf["call_attempts"], errors="coerce").fillna(0).astype(int)
         today = date.today().isoformat()
         due = pdf[pdf["next_follow_up"].astype(str) == today]
         overdue = pdf[(pdf["next_follow_up"].astype(str) != "") & (pdf["next_follow_up"].astype(str) < today)]
@@ -5708,7 +5720,7 @@ with tab_pipeline:
                             "note": "" if pd.isna(r.get("note", "")) else str(r.get("note", "")),
                             "next_follow_up": "" if pd.isna(r.get("next_follow_up", "")) else str(r.get("next_follow_up", "")),
                             "last_contacted": "" if pd.isna(r.get("last_contacted", "")) else str(r.get("last_contacted", "")),
-                            "call_attempts": 0 if pd.isna(r.get("call_attempts", 0)) else int(r.get("call_attempts", 0)),
+                            "call_attempts": safe_int(r.get("call_attempts", 0)),
                             "outcome": "" if pd.isna(r.get("outcome", "")) else str(r.get("outcome", "")),
                         }
                     st.success(f"Imported {len(imp)} rows.")
