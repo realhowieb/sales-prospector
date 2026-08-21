@@ -574,6 +574,10 @@ PUBLIC_REP_SELECT = ",".join([
     "availability_status", "preferred_categories", "preferred_company_types",
     "preferred_compensation", "minimum_commission", "notes_for_companies",
 ])
+LEGACY_REP_SELECT = ",".join([
+    "id", "created_at", "name", "company", "categories", "metros", "deal",
+    "deal_strength", "rating", "reviews", "response", "verified", "blurb",
+])
 PUBLIC_COMPANY_SELECT = ",".join([
     "id", "created_at", "updated_at", "name", "slug", "logo_url", "website",
     "description", "industries", "categories", "company_size", "headquarters",
@@ -876,6 +880,18 @@ def _sb_check(r):
         raise RuntimeError(f"Supabase {r.status_code}: {r.text[:300]}{hint}")
 
 
+def show_supabase_setup_notice():
+    if st.session_state.get("supabase_setup_notice_shown"):
+        return
+    st.session_state["supabase_setup_notice_shown"] = True
+    st.warning(
+        "Supabase is connected, but the database schema is older than this app version. "
+        "Using available legacy/demo data for now. Run the latest `supabase_setup.sql` "
+        "or migrations `001`-`019` in Supabase to enable companies, opportunities, "
+        "pipeline sync, reviews, and production hardening."
+    )
+
+
 def normalize_rep_row(row: dict) -> dict:
     row["categories"] = clean_list(row.get("categories"))
     row["metros"] = clean_list(row.get("metros"))
@@ -966,6 +982,29 @@ def fetch_reps_db(filters_key: tuple = ()) -> list[dict]:
         f"{SUPABASE_URL}/rest/v1/reps", headers=_sb_headers(),
         params=supabase_rep_search_params(filters), timeout=20,
     )
+    if r.status_code >= 400:
+        legacy_params = {"select": LEGACY_REP_SELECT, "order": "created_at.desc", "limit": 200}
+        if filters.get("verified_only"):
+            legacy_params["verified"] = "eq.true"
+        if filters.get("categories"):
+            legacy_params["categories"] = f"ov.{pg_array_literal(filters['categories'])}"
+        if filters.get("metros"):
+            legacy_params["metros"] = f"ov.{pg_array_literal(filters['metros'])}"
+        keyword = (filters.get("keyword") or "").strip()
+        if keyword:
+            safe_keyword = re.sub(r"[^A-Za-z0-9 @._&/-]+", " ", keyword).strip()
+            if safe_keyword:
+                pattern = f"*{safe_keyword.split()[0]}*"
+                legacy_params["or"] = (
+                    f"(name.ilike.{pattern},company.ilike.{pattern},"
+                    f"blurb.ilike.{pattern},deal.ilike.{pattern})"
+                )
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/reps",
+            headers=_sb_headers(),
+            params=legacy_params,
+            timeout=20,
+        )
     _sb_check(r)
     rows = r.json()
     for row in rows:
@@ -1014,7 +1053,7 @@ def all_reps(filters: dict | None = None) -> list[dict]:
         try:
             return fetch_reps_db(filter_key(filters))
         except Exception as exc:
-            st.warning(f"Marketplace database unreachable ({exc}). Showing sample reps for now.")
+            show_supabase_setup_notice()
             return [normalize_rep_row(rep.copy()) for rep in REPS_SEED]
     return [normalize_rep_row(rep.copy()) for rep in (REPS_SEED + st.session_state.setdefault("my_reps", []))]
 
@@ -1055,7 +1094,7 @@ def all_companies() -> list[dict]:
         try:
             return fetch_companies_db()
         except Exception as exc:
-            st.warning(f"Company directory database unreachable ({exc}). Showing this-session companies for now.")
+            show_supabase_setup_notice()
     return [normalize_company_row(c.copy()) for c in st.session_state.setdefault("my_companies", [])]
 
 
@@ -1169,7 +1208,7 @@ def all_opportunities(company_id: str = "") -> list[dict]:
         try:
             return fetch_opportunities_db(str(company_id).replace("co-", ""))
         except Exception as exc:
-            st.warning(f"Opportunity marketplace database unreachable ({exc}). Showing this-session opportunities for now.")
+            show_supabase_setup_notice()
     rows = st.session_state.setdefault("my_opportunities", [])
     if company_id:
         cid = str(company_id).replace("co-", "")
