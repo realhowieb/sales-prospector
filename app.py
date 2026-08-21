@@ -3920,8 +3920,18 @@ def render_marketplace():
         m2.metric("Top match", f"{top_match.score}%" if top_match and top_match.enough_context else matched[0][1])
         m3.metric("⏱ Reply within ~2 hrs", fast)
         st.divider()
-        for rep, sc, rating, rcount, real, recent, distance, match in matched:
+        _mtotal = len(matched)
+        if st.session_state.get("_mkt_sig") != _mtotal:
+            st.session_state["_mkt_sig"] = _mtotal
+            st.session_state["mkt_shown"] = min(20, _mtotal)
+        _mshown = st.session_state.get("mkt_shown", min(20, _mtotal))
+        for rep, sc, rating, rcount, real, recent, distance, match in matched[:_mshown]:
             rep_card(rep, sc, rating, rcount, real, recent, distance, match)
+        if _mtotal > _mshown:
+            st.caption(f"Showing top {_mshown} of {_mtotal} matches.")
+            if st.button(f"Show {min(20, _mtotal - _mshown)} more", key="mkt_more", use_container_width=True):
+                st.session_state["mkt_shown"] = _mshown + 20
+                st.rerun()
 
     st.divider()
     with st.expander("🙋 List yourself as a rep — get found by customers"):
@@ -5584,7 +5594,7 @@ with tab_discover:
 
         if HAVE_PYDECK and len(view):
             colors = {k: v["color"] for k, v in CATEGORIES.items()}
-            mp = view.copy()
+            mp = view.head(80).copy()   # cap map points — WebGL is the heaviest thing on mobile
             mp["color"] = mp["category"].map(colors)
             mp_bbox = st.session_state.get("bbox", METROS[metro])
             layer = pdk.Layer(
@@ -5604,8 +5614,18 @@ with tab_discover:
             ), use_container_width=True)
 
         st.divider()
-        for _, r in view.iterrows():
+        _dtotal = len(view)
+        if st.session_state.get("_disc_sig") != _dtotal:
+            st.session_state["_disc_sig"] = _dtotal
+            st.session_state["disc_shown"] = min(25, _dtotal)
+        _dshown = st.session_state.get("disc_shown", min(25, _dtotal))
+        for _, r in view.head(_dshown).iterrows():
             prospect_card(r)
+        if _dtotal > _dshown:
+            st.caption(f"Showing {_dshown} of {_dtotal}, sorted by lead score.")
+            if st.button(f"Show {min(25, _dtotal - _dshown)} more", key="disc_more", use_container_width=True):
+                st.session_state["disc_shown"] = _dshown + 25
+                st.rerun()
 
 
 with tab_pipeline:
