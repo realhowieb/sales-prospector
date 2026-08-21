@@ -1,3 +1,5 @@
+"""Subscription plans and entitlement checks that gate features (contact rep, full profile, advanced search, territory intelligence, featured listings)."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

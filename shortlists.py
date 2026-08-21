@@ -1,3 +1,5 @@
+"""Saved/shortlisted reps, companies, and opportunities: collections, target keys, and session helpers."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

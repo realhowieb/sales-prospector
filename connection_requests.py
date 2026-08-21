@@ -1,3 +1,5 @@
+"""Company↔rep connection requests: payload building, status/initiator normalization, and contact-visibility rules."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

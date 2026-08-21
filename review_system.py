@@ -1,3 +1,5 @@
+"""Review payloads, status normalization, rating clamping, duplicate detection, and rating summaries."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

@@ -1,3 +1,5 @@
+"""Shared helpers: HTML/text utilities, lead scoring & heat, geo distance/area matching, formatting, and pipeline payloads."""
+
 from __future__ import annotations
 
 import hashlib

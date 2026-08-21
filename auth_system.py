@@ -1,3 +1,5 @@
+"""Account roles, sessions, and permission checks (rep/company creation, admin access)."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

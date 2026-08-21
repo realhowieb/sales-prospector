@@ -5593,25 +5593,28 @@ with tab_discover:
         m4.metric("Avg lead score", int(view["score"].mean()) if len(view) else 0)
 
         if HAVE_PYDECK and len(view):
-            colors = {k: v["color"] for k, v in CATEGORIES.items()}
-            mp = view.head(80).copy()   # cap map points — WebGL is the heaviest thing on mobile
-            mp["color"] = mp["category"].map(colors)
-            mp_bbox = st.session_state.get("bbox", METROS[metro])
-            layer = pdk.Layer(
-                "ScatterplotLayer", data=mp,
-                get_position="[lon, lat]", get_fill_color="color",
-                get_radius="40 + score * 3", radius_min_pixels=4, radius_max_pixels=22,
-                pickable=True, opacity=0.8,
-            )
-            view_state = pdk.ViewState(
-                latitude=(mp_bbox[0] + mp_bbox[2]) / 2,
-                longitude=(mp_bbox[1] + mp_bbox[3]) / 2,
-                zoom=10.5,
-            )
-            st.pydeck_chart(pdk.Deck(
-                layers=[layer], initial_view_state=view_state,
-                map_style=None, tooltip={"text": "{name}\n{category} · score {score}"},
-            ), use_container_width=True)
+            # Collapsed by default: a live WebGL canvas is the heaviest thing to
+            # keep mounted while scrolling on mobile, so only mount it on demand.
+            with st.expander(f"🗺 Map of top {min(80, len(view))} prospects", expanded=False):
+                colors = {k: v["color"] for k, v in CATEGORIES.items()}
+                mp = view.head(80).copy()   # cap map points
+                mp["color"] = mp["category"].map(colors)
+                mp_bbox = st.session_state.get("bbox", METROS[metro])
+                layer = pdk.Layer(
+                    "ScatterplotLayer", data=mp,
+                    get_position="[lon, lat]", get_fill_color="color",
+                    get_radius="40 + score * 3", radius_min_pixels=4, radius_max_pixels=22,
+                    pickable=True, opacity=0.8,
+                )
+                view_state = pdk.ViewState(
+                    latitude=(mp_bbox[0] + mp_bbox[2]) / 2,
+                    longitude=(mp_bbox[1] + mp_bbox[3]) / 2,
+                    zoom=10.5,
+                )
+                st.pydeck_chart(pdk.Deck(
+                    layers=[layer], initial_view_state=view_state,
+                    map_style=None, tooltip={"text": "{name}\n{category} · score {score}"},
+                ), use_container_width=True)
 
         st.divider()
         _dtotal = len(view)

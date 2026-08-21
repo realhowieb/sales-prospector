@@ -1,3 +1,5 @@
+"""Territory analytics: matching reps/opportunities/companies for a query and per-metro activity rows."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

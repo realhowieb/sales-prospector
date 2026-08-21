@@ -1,3 +1,5 @@
+"""Claiming an existing rep listing: claim payload building and claim-status normalization."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

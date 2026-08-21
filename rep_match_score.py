@@ -1,3 +1,5 @@
+"""Rep↔opportunity match scoring, including product-line conflict detection and match-confidence labels."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
