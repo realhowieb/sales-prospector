@@ -29,8 +29,10 @@ it on:
 2. **SQL Editor → run [`supabase_setup.sql`](supabase_setup.sql)** — creates the marketplace,
    leads, reviews, and pipeline tables with public read policies only where needed.
 3. **Project Settings → API** → copy the **Project URL**, the **anon public key**, and the
-   **service_role** key. The service key stays server-side in Streamlit secrets and is required
-   for listing submissions, lead capture, verified reviews, listing management, and pipeline sync.
+   **service_role** key. The service key stays server-side in Streamlit secrets and is still used
+   for private admin/server workflows such as lead capture, review moderation, legacy listing
+   management, and pipeline sync. New rep/company/opportunity creation uses signed-in Supabase
+   users so ownership is enforced by RLS.
 4. Add them as secrets:
    - **Streamlit Cloud:** app → Settings → Secrets → paste the `[supabase]` block.
    - **Local:** copy [`.streamlit/secrets.toml.example`](.streamlit/secrets.toml.example) to
@@ -43,13 +45,47 @@ it on:
 
    [app]
    base_url = "https://YOUR-STREAMLIT-APP-URL"
+
+   [admin]
+   code_hash = "SHA256-OF-YOUR-ADMIN-CODE"
    ```
 5. Reload. The Customer tab now shows **🟢 Live marketplace**. Empty at first — use **Load 16
    sample reps** once to populate, or let real reps register via **List yourself as a rep**.
 
 **Moderation/security:** public visitors can read public marketplace data, but direct anon-key
-inserts are blocked. The app performs public submissions server-side with the `service_role` key
-after validation and session rate limits.
+inserts are blocked. Public marketplace creation requires email/password Supabase Auth, writes
+records with `owner_user_id`, and lets RLS enforce ownership. Admin access can be granted by
+inserting the user into `admin_account_roles`; the legacy `[admin].code_hash` remains a server-side
+fallback for moderation.
+
+The **Admin Dashboard** sidebar mode is available when live Supabase writes are configured. It
+lets approved admins review reps and companies, approve profile claims, moderate reviews, hide or
+suspend profiles, feature reps/companies/opportunities, inspect reported content, and monitor
+recent signups plus connection activity.
+
+### Monetization-ready entitlements
+The app has a subscription/entitlement layer but does **not** process payments yet. Account
+profiles can carry `subscription_plan` values such as `rep_free`, `rep_pro`, `company_free`, and
+`company_pro`, plus Stripe placeholder IDs for a later server-side Stripe integration. Feature
+checks live in `monetization.py` (`can_contact_rep`, `can_view_full_profile`,
+`can_use_advanced_search`, `can_view_territory_intelligence`, `can_be_featured`) so permissions
+are not hardcoded throughout the UI.
+
+By default, `[monetization].enforce_entitlements = false` keeps local/dev testing unrestricted.
+Set it to `true` later to make plan limits active.
+
+### Public marketplace pages
+Streamlit does not provide traditional dynamic routes like `/rep/john-smith` without an external
+router, so public pages use stable query URLs:
+
+- `?rep=profile-slug`
+- `?company=company-slug`
+- `?opportunity=opportunity-slug`
+- `?territory=san-jose-ca`
+- `?category=security`
+
+Territory and category pages render only when backed by active marketplace reps, companies, or
+opportunities. The app does not generate fake or thin SEO pages.
 
 ### Delivering the leads (customer → rep)
 When a customer hits **Request an intro** on a rep card, they submit their name + email/phone +
@@ -84,21 +120,22 @@ submissions are read-only; no Supabase → the request is logged for the session
   when that key is set.
 
 Re-run `supabase_setup.sql` after updating — it adds the `reviews` table and the `edit_code_hash` /
-`active`, sample, service-area, verified-review, and pipeline columns (idempotent where possible).
+`active`, sample, service-area, verified-review, pipeline, and professional profile columns
+(idempotent where possible).
+For production, use the versioned files in `migrations/` so DB changes are auditable.
 
 ## Rep side — what it does
 - Search any US metro (presets) or type any city (geocoded via OSM Nominatim).
 - Pull real businesses in 8 categories (restaurants, fitness, auto, home services,
   medical, retail, professional services, beauty).
-- **Lead score (0–100)** from real listing signals a rep can act on:
-  - Has a phone → reachable (+35)
-  - No website → a digital-presence gap you can help close (+35)
-  - Street address → you can plan a visit (+15)
-  - Independent (not a chain) → a real local decision-maker (+15)
+- **Lead score (0–100)** from real listing signals a rep can act on. Weights change by selected
+  product profile, such as Marketing/Web, Security/ADT, POS, Payroll/HR, Insurance, or Merchant
+  Services.
 - Map view (pydeck) + summary metrics (hot leads, presence gaps, avg score).
 - **Pipeline**: move prospects through New → Contacted → Qualified → Won / Passed, add
   call notes and next follow-up dates. With Supabase `service_key`, reps can sync a private
-  pipeline using their email + pipeline code; CSV export/import still works.
+  pipeline using their email + pipeline code; if they paste a Supabase Auth access token, rows are
+  also bound to their `user_id`. CSV export/import still works.
 
 ## Run locally
 ```bash
