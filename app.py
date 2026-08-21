@@ -2356,6 +2356,17 @@ else:
     st.caption("Tell us what you need and where — matched reps compete on their offer, rating, and response time.")
 
 # ---- Sidebar controls (per audience) ----
+product_profile = next(iter(PRODUCT_PROFILES))
+metro = next(iter(METROS))
+custom = ""
+cats = []
+cap = 200
+go = False
+min_score = 0
+only_no_web = False
+indie_only = False
+heat_filter = []
+sort_by = "Lead score"
 with st.sidebar:
     st.divider()
     if rep_mode:
