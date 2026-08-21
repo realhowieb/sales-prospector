@@ -46,23 +46,15 @@ from connection_requests import (
 )
 from prospecting_core import (
     PRODUCT_PROFILES,
-    availability_status,
     bbox_center,
     build_pipeline_payload,
-    clean_list,
     escape_html as h,
-    format_availability,
-    format_compensation,
-    format_industries,
-    format_territories,
     hash_code as _hash_code,
     heat_of,
     lead_score,
+    miles_between,
     normalize_owner_email,
-    rep_area_match,
-    safe_public_url,
     sales_insight,
-    slugify,
 )
 from profile_claims import build_profile_claim_payload, is_claimable_rep, normalize_claim_status
 from rep_match_score import RepMatchResult, score_opportunity_rep_match, score_rep_match
@@ -87,6 +79,110 @@ from territory_intelligence import (
     matching_opportunities,
     matching_reps,
 )
+
+
+def slugify(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", (value or "").strip().lower())
+    return slug.strip("-") or "rep"
+
+
+def clean_list(value) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        items = value.split(",")
+    else:
+        items = value
+    return [str(item).strip() for item in items if str(item).strip()]
+
+
+def format_compensation(rep: dict) -> str:
+    comp_types = clean_list(rep.get("compensation_types"))
+    low = rep.get("commission_min")
+    high = rep.get("commission_max")
+    bits = []
+    if low not in (None, "") and high not in (None, ""):
+        bits.append(f"{float(low):g}-{float(high):g}% commission")
+    elif low not in (None, ""):
+        bits.append(f"from {float(low):g}% commission")
+    elif high not in (None, ""):
+        bits.append(f"up to {float(high):g}% commission")
+    if comp_types:
+        bits.append(", ".join(comp_types))
+    return " · ".join(bits) if bits else "Compensation varies by line"
+
+
+def availability_status(rep: dict) -> str:
+    status = (rep.get("availability_status") or "").strip().lower().replace("_", " ")
+    if status in {"open", "selectively open", "not open"}:
+        return status
+    return "open" if rep.get("open_to_new_lines", True) else "not open"
+
+
+def format_territories(rep: dict) -> str:
+    states = clean_list(rep.get("states"))
+    zips = clean_list(rep.get("zip_codes"))
+    metros = clean_list(rep.get("metros"))
+    radius = rep.get("territory_radius") or rep.get("service_radius_miles")
+    parts = []
+    if states:
+        parts.append("States: " + ", ".join(states[:6]))
+    if zips:
+        parts.append("ZIPs: " + ", ".join(zips[:6]))
+    if metros:
+        parts.append("Metros: " + ", ".join(metros[:4]))
+    if radius:
+        parts.append(f"{int(radius)} mi radius")
+    return " · ".join(parts) if parts else "Territory available on request"
+
+
+def format_industries(rep: dict) -> str:
+    industries = clean_list(rep.get("industries")) or clean_list(rep.get("categories"))
+    customer_types = clean_list(rep.get("customer_types"))
+    parts = []
+    if industries:
+        parts.append("Industries: " + ", ".join(industries[:5]))
+    if customer_types:
+        parts.append("Customers: " + ", ".join(customer_types[:4]))
+    return " · ".join(parts) if parts else "Industry fit varies by opportunity"
+
+
+def format_availability(rep: dict) -> str:
+    status = rep.get("profile_status") or "active"
+    if status != "active":
+        return status.title()
+    availability = availability_status(rep)
+    if availability == "open":
+        return "Open to new lines"
+    if availability == "selectively open":
+        return "Selectively open"
+    return "Not open to new lines"
+
+
+def safe_public_url(value: str) -> str:
+    url = (value or "").strip()
+    if url.startswith(("https://", "http://")):
+        return url
+    return ""
+
+
+def rep_area_match(rep: dict, metro: str, center: tuple[float, float] | None = None) -> bool:
+    if not metro:
+        return True
+    metro_l = metro.lower()
+    fields = [
+        " ".join(clean_list(rep.get("metros"))),
+        str(rep.get("service_area") or ""),
+        " ".join(clean_list(rep.get("states"))),
+        " ".join(clean_list(rep.get("zip_codes"))),
+    ]
+    if any(metro_l in field.lower() for field in fields):
+        return True
+    if center and rep.get("service_lat") is not None and rep.get("service_lon") is not None:
+        radius = float(rep.get("service_radius_miles") or rep.get("territory_radius") or 25)
+        return miles_between(float(rep["service_lat"]), float(rep["service_lon"]), center[0], center[1]) <= radius
+    return False
+
 
 # pydeck ships with streamlit, but guard the import so a stale-module deploy
 # degrades to the list view instead of crashing the whole app.
