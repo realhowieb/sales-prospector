@@ -28,6 +28,7 @@ Plus **🗺 Territory Intelligence** (per-metro activity and matches) and **⭐ 
 | `profile_claims` | Reps claiming an existing listing |
 | `shortlists` | Saved reps/companies/opportunities |
 | `territory_intelligence` | Matching reps/opportunities/companies + metro activity |
+| `deployment_status` | App/schema version helpers and deployment diagnostics |
 
 ## Data & modes
 - **Prospecting (rep side)** always uses live OpenStreetMap/Overpass + Nominatim geocoding — no key.
@@ -45,6 +46,8 @@ lead details are private (service-role only) and reps are notified by email.
 1. Create a free project at [supabase.com](https://supabase.com).
 2. **SQL Editor → run [`supabase_setup.sql`](supabase_setup.sql)** — creates/updates the `reps`,
    `leads`, `reviews`, `pipeline_entries` (and related) tables and RLS policies. It's idempotent.
+   The setup also writes `schema_migrations` through version `020`, so the app can report whether
+   the live database is current.
 3. **Project Settings → API** → copy the **Project URL**, the **anon** key, and the **service_role**
    key.
 4. Add secrets (Streamlit Cloud → Settings → Secrets, or local `.streamlit/secrets.toml` — see
@@ -60,7 +63,9 @@ lead details are private (service-role only) and reps are notified by email.
    password = "re_YOUR_RESEND_API_KEY"
    from = "leads@hsfinest.ai"
    ```
-5. Reload. Empty at first — use **Load sample reps** once, or let real reps/companies register.
+5. Reload, then open **🩺 Deployment Status** in the sidebar to confirm the app version, schema
+   version, and required table checks. Empty at first — use **Load sample reps** once, or let real
+   reps/companies register.
 
 Each layer degrades gracefully: no `[smtp]` → data still saves, no email; no `service_key` →
 live writes are read-only; no `[supabase]` → session/demo mode. The app never white-screens on
@@ -78,6 +83,8 @@ missing config — it does as much as it's configured to do.
   territory intelligence.
 - **Mobile:** long result lists are paginated ("Show more") and the map is collapsed by default,
   so scrolling stays smooth on phones.
+- **Deployment status:** the sidebar includes a diagnostics page for Supabase table reachability,
+  schema migration version, app version, and service-role configuration.
 
 ## Run locally
 ```bash
