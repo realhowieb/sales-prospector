@@ -44,6 +44,12 @@ from connection_requests import (
     duplicate_open_connection,
     normalize_connection_status,
 )
+from deployment_status import (
+    APP_VERSION,
+    CORE_TABLES,
+    REQUIRED_SCHEMA_VERSION,
+    schema_status,
+)
 from prospecting_core import (
     PRODUCT_PROFILES,
     bbox_center,
@@ -569,6 +575,9 @@ CONTENT_REPORT_FIELDS = [
     "target_type", "target_id", "reason", "details", "reporter_email",
     "status", "reviewed_at", "reviewed_by", "admin_notes",
 ]
+ADMIN_AUDIT_FIELDS = [
+    "actor_user_id", "actor_email", "action", "target_type", "target_id", "metadata",
+]
 ANALYTICS_EVENTS = {
     "rep_profile_view", "opportunity_view", "search", "save_rep",
     "save_opportunity", "connection_request", "connection_accept",
@@ -605,6 +614,7 @@ PUBLIC_OPPORTUNITY_SELECT = ",".join([
     "application_count", "expires_at", "competitor_info_public",
     "companies(name,slug,verified)",
 ])
+SCHEMA_MIGRATION_SELECT = "version,name,applied_at"
 def _email_cfg():
     """Resend-over-SMTP config from secrets. Only `password` (Resend key) + `from` required."""
     try:
@@ -904,6 +914,27 @@ def show_supabase_setup_notice():
     )
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_schema_migrations_db() -> list[dict]:
+    if not SUPABASE_ON:
+        return []
+    r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/schema_migrations",
+        headers=_sb_headers(),
+        params={"select": SCHEMA_MIGRATION_SELECT, "order": "version.desc"},
+        timeout=20,
+    )
+    if r.status_code >= 400:
+        return []
+    return r.json()
+
+
+def current_schema_status() -> dict:
+    if not SUPABASE_ON:
+        return schema_status([], REQUIRED_SCHEMA_VERSION)
+    return schema_status(fetch_schema_migrations_db(), REQUIRED_SCHEMA_VERSION)
+
+
 def normalize_rep_row(row: dict) -> dict:
     row["categories"] = clean_list(row.get("categories"))
     row["metros"] = clean_list(row.get("metros"))
@@ -1134,6 +1165,78 @@ def insert_company_user_db(company: dict):
     fetch_companies_db.clear()
 
 
+def company_from_osm(biz: dict, metro_label: str) -> dict:
+    """Map a parsed OpenStreetMap business into an unclaimed company profile."""
+    name = str(biz.get("name") or "").strip()
+    cat = biz.get("category")
+    return {
+        "name": name,
+        "slug": slugify(name),
+        "logo_url": "",
+        "website": biz.get("website") or "",
+        "description": (f"{cat or 'Local business'} in {metro_label}. Imported directory listing "
+                        "— unclaimed. If this is your company, claim it to add product lines and "
+                        "define where you need reps."),
+        "industries": [],
+        "categories": [cat] if cat else [],
+        "company_size": "",
+        "headquarters": metro_label,
+        "states_needed": [],
+        "metros_needed": [metro_label],
+        "customer_types": [],
+        "opportunities": "",
+        "verified": False,
+        "profile_status": "active",
+        "contact_name": "",
+        "contact_email": "",
+        "edit_code_hash": None,
+        "source": "imported",
+        "owner_user_id": None,
+        "featured": False,
+    }
+
+
+def import_companies_from_osm(categories: list[str], metro: str, cap: int = 60) -> tuple[int, int]:
+    """Seed the directory with real businesses (as unclaimed companies) from Overpass.
+
+    Returns (added, scanned). Dedupes by name-slug against existing companies.
+    Writes to Supabase when live, else to session state (demo).
+    """
+    if metro not in METROS:
+        raise ValueError("Pick a preset metro to import from.")
+    elements = fetch_overpass(build_query(METROS[metro], categories, cap))
+    biz_df = parse_elements(elements, "Marketing/Web")
+    scanned = 0 if biz_df is None or biz_df.empty else len(biz_df)
+    if not scanned:
+        return 0, 0
+    existing_slugs = {slugify(str(c.get("name") or "")) for c in all_companies()}
+    new_rows, seen = [], set()
+    for _, b in biz_df.iterrows():
+        slug = slugify(str(b.get("name") or ""))
+        if not slug or slug in existing_slugs or slug in seen:
+            continue
+        seen.add(slug)
+        new_rows.append(company_from_osm(b, metro))
+    if not new_rows:
+        return 0, scanned
+    if SUPABASE_ON:
+        payload = [{k: c.get(k) for k in COMPANY_FIELDS} for c in new_rows]
+        r = requests.post(
+            f"{SUPABASE_URL}/rest/v1/companies",
+            headers=_sb_service_headers({"Prefer": "return=minimal"}),
+            json=payload, timeout=30,
+        )
+        _sb_check(r)
+        fetch_companies_db.clear()
+    else:
+        mine = st.session_state.setdefault("my_companies", [])
+        base = len(mine)
+        for i, c in enumerate(new_rows):
+            c["id"] = f"co-import-{base + i + 1}"
+            mine.append(c)
+    return len(new_rows), scanned
+
+
 def find_companies_by_email(email: str) -> list[dict]:
     r = requests.get(
         f"{SUPABASE_URL}/rest/v1/companies",
@@ -1159,6 +1262,7 @@ def update_company_db(company_id: str, patch: dict):
     )
     _sb_check(r)
     fetch_companies_db.clear()
+    track_admin_action("company.update", "company", db_id, {"fields": sorted(patch.keys())})
 
 
 def update_opportunity_db(opportunity_id, patch: dict):
@@ -1171,6 +1275,7 @@ def update_opportunity_db(opportunity_id, patch: dict):
     )
     _sb_check(r)
     fetch_opportunities_db.clear()
+    track_admin_action("opportunity.update", "opportunity", db_id, {"fields": sorted(patch.keys())})
 
 
 def normalize_opportunity_row(row: dict) -> dict:
@@ -1303,6 +1408,28 @@ def track_once(key: str, event_name: str, **kwargs):
         return
     seen.append(key)
     track_event(event_name, **kwargs)
+
+
+def track_admin_action(action: str, target_type: str = "", target_id: str = "", metadata: dict | None = None):
+    if not (LIVE_WRITES_ON and admin_access_unlocked()):
+        return
+    payload = {
+        "actor_user_id": current_auth_user_id() or None,
+        "actor_email": current_auth_email() or None,
+        "action": action,
+        "target_type": target_type or None,
+        "target_id": str(target_id) if target_id not in (None, "") else None,
+        "metadata": analytics_metadata(metadata),
+    }
+    try:
+        requests.post(
+            f"{SUPABASE_URL}/rest/v1/admin_audit_log",
+            headers=_sb_service_headers({"Prefer": "return=minimal"}),
+            json={k: payload.get(k) for k in ADMIN_AUDIT_FIELDS},
+            timeout=8,
+        )
+    except Exception:
+        pass
 
 
 def normalize_connection_row(row: dict) -> dict:
@@ -1927,6 +2054,7 @@ def update_rep_db(db_id, patch: dict):
                        json=patch, timeout=20)
     _sb_check(r)
     fetch_reps_db.clear()
+    track_admin_action("rep.update", "rep", db_id, {"fields": sorted(patch.keys())})
 
 
 def delete_rep_db(db_id):
@@ -1934,6 +2062,7 @@ def delete_rep_db(db_id):
                         headers=_sb_service_headers(), timeout=20)
     _sb_check(r)
     fetch_reps_db.clear()
+    track_admin_action("rep.delete", "rep", db_id)
 
 
 def insert_profile_claim_db(rep: dict, claimant_email: str, claimant_name: str = "", message: str = ""):
@@ -1959,6 +2088,7 @@ def update_profile_claim_db(claim_id, patch: dict):
         timeout=20,
     )
     _sb_check(r)
+    track_admin_action("profile_claim.update", "profile_claim", db_id, {"fields": sorted(patch.keys())})
 
 
 def approve_profile_claim(claim: dict, admin_email: str = "", notes: str = ""):
@@ -1995,6 +2125,7 @@ def update_review_db(review_id, patch: dict):
     )
     _sb_check(r)
     fetch_reviews_db.clear()
+    track_admin_action("review.update", "review", str(review_id).strip(), {"fields": sorted(patch.keys())})
 
 
 def moderate_review(review: dict, status: str, reviewer: str = "", notes: str = ""):
@@ -2017,7 +2148,7 @@ def fetch_table_db(table: str, limit: int = 50) -> list[dict]:
     allowed = {
         "reps", "leads", "reviews", "companies", "profile_claims",
         "connections", "opportunities", "content_reports", "account_profiles",
-        "marketplace_events",
+        "marketplace_events", "schema_migrations", "admin_audit_log",
     }
     if table not in allowed:
         raise ValueError("Unsupported table")
@@ -2039,6 +2170,7 @@ def update_content_report_db(report_id, patch: dict):
         timeout=20,
     )
     _sb_check(r)
+    track_admin_action("content_report.update", "content_report", str(report_id).strip(), {"fields": sorted(patch.keys())})
 
 
 def admin_access_unlocked() -> bool:
@@ -2180,6 +2312,57 @@ def render_admin_analytics(events: list[dict], reps: list[dict], companies: list
             use_container_width=True,
             hide_index=True,
         )
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def check_supabase_table(table: str) -> dict:
+    if not SUPABASE_ON:
+        return {"table": table, "status": "demo mode", "detail": "Supabase not configured"}
+    headers = _sb_service_headers() if SUPABASE_SERVICE_KEY else _sb_headers()
+    r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/{table}",
+        headers=headers,
+        params={"select": "*", "limit": 1},
+        timeout=12,
+    )
+    if r.status_code < 400:
+        return {"table": table, "status": "ok", "detail": "reachable"}
+    if r.status_code == 404 or "PGRST205" in r.text:
+        return {"table": table, "status": "missing", "detail": "not found in Supabase schema cache"}
+    if r.status_code in (401, 403):
+        return {"table": table, "status": "restricted", "detail": "exists or unknown; not readable with configured key"}
+    return {"table": table, "status": "error", "detail": f"{r.status_code}: {r.text[:120]}"}
+
+
+def render_deployment_status_page():
+    st.subheader("Deployment Status")
+    status = current_schema_status()
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("App version", APP_VERSION)
+    c2.metric("Supabase", "connected" if SUPABASE_ON else "demo mode")
+    c3.metric("Service role", "configured" if SUPABASE_SERVICE_KEY else "missing")
+    c4.metric("Schema", status["current"] or "not tracked", f"required {status['required']}")
+
+    if not SUPABASE_ON:
+        st.info("Supabase secrets are not configured. The app is running in local/demo mode.")
+    elif status["ok"]:
+        st.success(status["label"])
+    else:
+        st.warning(
+            f"{status['label']}. Run the latest `supabase_setup.sql` in Supabase SQL Editor, "
+            "then refresh this page."
+        )
+
+    st.caption("Table checks use the service role when configured; otherwise they use the anon key and may show restricted tables.")
+    rows = [check_supabase_table(table) for table in CORE_TABLES]
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    migrations = fetch_schema_migrations_db()
+    if migrations:
+        st.subheader("Applied Migrations")
+        st.dataframe(pd.DataFrame(migrations), use_container_width=True, hide_index=True)
+    else:
+        st.caption("No schema migration tracking rows are readable yet.")
 
 
 def rep_score(rep: dict, rating: float | None = None) -> int:
@@ -2421,6 +2604,7 @@ with st.sidebar:
         "📊 Territory Intelligence",
         "⭐ Saved Reps",
         "⭐ Saved Opportunities",
+        "🩺 Deployment Status",
     ]
     if LIVE_WRITES_ON:
         audience_options.append("🛡️ Admin Dashboard")
@@ -2436,6 +2620,7 @@ company_directory_mode = audience.startswith("🏢")
 territory_intelligence_mode = audience.startswith("📊")
 saved_reps_mode = audience.startswith("⭐ Saved Reps")
 saved_opportunities_mode = audience.startswith("⭐ Saved Opportunities")
+deployment_status_mode = audience.startswith("🩺")
 admin_dashboard_mode = audience.startswith("🛡️")
 public_seo_mode = bool(st.query_params.get("territory", "") or st.query_params.get("category", ""))
 if st.query_params.get("opportunity", ""):
@@ -2446,6 +2631,7 @@ if st.query_params.get("opportunity", ""):
     territory_intelligence_mode = False
     saved_reps_mode = False
     saved_opportunities_mode = False
+    deployment_status_mode = False
     admin_dashboard_mode = False
 elif st.query_params.get("company", ""):
     public_seo_mode = False
@@ -2455,6 +2641,7 @@ elif st.query_params.get("company", ""):
     territory_intelligence_mode = False
     saved_reps_mode = False
     saved_opportunities_mode = False
+    deployment_status_mode = False
     admin_dashboard_mode = False
 elif st.query_params.get("rep", ""):
     public_seo_mode = False
@@ -2464,6 +2651,7 @@ elif st.query_params.get("rep", ""):
     territory_intelligence_mode = False
     saved_reps_mode = False
     saved_opportunities_mode = False
+    deployment_status_mode = False
     admin_dashboard_mode = False
 elif public_seo_mode:
     home_mode = False
@@ -2472,6 +2660,7 @@ elif public_seo_mode:
     territory_intelligence_mode = False
     saved_reps_mode = False
     saved_opportunities_mode = False
+    deployment_status_mode = False
     admin_dashboard_mode = False
 
 if home_mode:
@@ -2492,6 +2681,9 @@ elif saved_reps_mode:
 elif saved_opportunities_mode:
     st.title("⭐ Saved Opportunities")
     st.caption("Saved companies and opportunities for this session.")
+elif deployment_status_mode:
+    st.title("🩺 Deployment Status")
+    st.caption("Check app version, Supabase schema version, required tables, and migration status.")
 elif admin_dashboard_mode:
     st.title("🛡️ Admin Dashboard")
     st.caption("Review, moderate, and manage marketplace activity.")
@@ -2575,6 +2767,9 @@ with st.sidebar:
     elif saved_reps_mode or saved_opportunities_mode:
         st.header("Shortlists")
         st.caption("Collections: Saved, Contact Later, Strong Candidates")
+    elif deployment_status_mode:
+        st.header("Diagnostics")
+        st.caption("Read-only deployment and Supabase schema checks.")
     elif home_mode:
         st.header("Marketplace")
         st.caption("Choose a path on the homepage to start searching.")
@@ -3455,6 +3650,10 @@ def render_admin_dashboard():
         connections = fetch_table_db("connections", 250)
         accounts = fetch_table_db("account_profiles", 250)
         events = fetch_table_db("marketplace_events", 1000)
+        try:
+            audit_log = fetch_table_db("admin_audit_log", 250)
+        except Exception:
+            audit_log = []
     except Exception as exc:
         st.error(f"Admin data unavailable: {exc}")
         return
@@ -3479,7 +3678,7 @@ def render_admin_dashboard():
     admin_name = current_auth_email() or "admin"
     tabs = st.tabs([
         "Reps", "Companies", "Claims", "Reviews", "Opportunities",
-        "Reports", "Signups", "Connections", "Analytics",
+        "Reports", "Signups", "Connections", "Analytics", "Audit Log",
     ])
 
     with tabs[0]:
@@ -3675,6 +3874,12 @@ def render_admin_dashboard():
 
     with tabs[8]:
         render_admin_analytics(events, reps, companies, opportunities, connections)
+
+    with tabs[9]:
+        admin_dataframe(audit_log, [
+            "id", "created_at", "actor_user_id", "actor_email", "action",
+            "target_type", "target_id", "metadata",
+        ], "No admin audit events recorded yet. Run migration 020 if this table is unavailable.")
 
 
 def homepage_data() -> tuple[list[dict], list[dict], list[dict]]:
@@ -4502,6 +4707,31 @@ def render_company_profile_page(ref: str):
 
 
 def render_company_create_form():
+    if (not SUPABASE_ON) or is_admin_role(current_account_role(), current_admin_verified()):
+        with st.expander("🌐 Pre-populate companies from OpenStreetMap (admin)"):
+            st.caption("Seed the directory with real businesses as **unclaimed** company profiles "
+                       "(owners can claim them later). Uses the same free OpenStreetMap data as "
+                       "prospecting — no API key.")
+            imp_cats = st.multiselect("Categories to import", list(CATEGORIES.keys()),
+                                      default=["Professional Svcs", "Retail Boutique"], key="imp_cats")
+            ic1, ic2 = st.columns(2)
+            imp_metro = ic1.selectbox("Metro", list(METROS.keys()), key="imp_metro")
+            imp_cap = ic2.slider("Max to scan", 20, 200, 60, step=20, key="imp_cap")
+            if st.button("Import companies", key="imp_go", disabled=not imp_cats, use_container_width=True):
+                if SUPABASE_ON and not LIVE_WRITES_ON:
+                    st.error("Live writes need the Supabase service_role key.")
+                else:
+                    try:
+                        with st.spinner(f"Importing companies from {imp_metro}…"):
+                            added, scanned = import_companies_from_osm(imp_cats, imp_metro, imp_cap)
+                        if added:
+                            st.success(f"Imported {added} new companies (scanned {scanned}) as "
+                                       "unclaimed listings.")
+                            st.rerun()
+                        else:
+                            st.info(f"No new companies to add (scanned {scanned}; all already listed).")
+                    except Exception as exc:
+                        st.error(f"Import failed: {exc}")
     with st.expander("List your company — find sales reps"):
         code_info = st.session_state.get("new_company_edit_code")
         if code_info:
@@ -5437,6 +5667,8 @@ if not rep_mode:
         render_saved_reps_page()
     elif saved_opportunities_mode:
         render_saved_opportunities_page()
+    elif deployment_status_mode:
+        render_deployment_status_page()
     elif admin_dashboard_mode:
         render_admin_dashboard()
     elif home_mode:
