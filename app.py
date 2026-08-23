@@ -48,7 +48,11 @@ from deployment_status import (
     APP_VERSION,
     CORE_TABLES,
     REQUIRED_SCHEMA_VERSION,
+    expected_columns_for,
     schema_status,
+    summarize_column_checks,
+    summarize_table_checks,
+    table_order_for,
 )
 from prospecting_core import (
     PRODUCT_PROFILES,
@@ -2155,7 +2159,7 @@ def fetch_table_db(table: str, limit: int = 50) -> list[dict]:
     r = requests.get(
         f"{SUPABASE_URL}/rest/v1/{table}",
         headers=_sb_service_headers(),
-        params={"select": "*", "order": "created_at.desc", "limit": limit},
+        params={"select": "*", "order": table_order_for(table), "limit": limit},
         timeout=20,
     )
     _sb_check(r)
@@ -2334,7 +2338,40 @@ def check_supabase_table(table: str) -> dict:
     return {"table": table, "status": "error", "detail": f"{r.status_code}: {r.text[:120]}"}
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def check_supabase_column(table: str, column: str) -> dict:
+    if not SUPABASE_ON:
+        return {"table": table, "column": column, "status": "demo mode", "detail": "Supabase not configured"}
+    headers = _sb_service_headers() if SUPABASE_SERVICE_KEY else _sb_headers()
+    r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/{table}",
+        headers=headers,
+        params={"select": column, "limit": 0},
+        timeout=12,
+    )
+    if r.status_code < 400:
+        return {"table": table, "column": column, "status": "ok", "detail": "reachable"}
+    if r.status_code == 404 or "PGRST205" in r.text:
+        return {"table": table, "column": column, "status": "missing", "detail": "table missing"}
+    if r.status_code == 400 and ("42703" in r.text or "does not exist" in r.text):
+        return {"table": table, "column": column, "status": "missing", "detail": "column missing"}
+    if r.status_code in (401, 403):
+        return {"table": table, "column": column, "status": "restricted", "detail": "not readable with configured key"}
+    return {"table": table, "column": column, "status": "error", "detail": f"{r.status_code}: {r.text[:120]}"}
+
+
+def check_supabase_columns() -> list[dict]:
+    rows = []
+    for table in CORE_TABLES:
+        for column in expected_columns_for(table):
+            rows.append(check_supabase_column(table, column))
+    return rows
+
+
 def render_deployment_status_page():
+    if LIVE_WRITES_ON and not render_admin_gate():
+        return
+
     st.subheader("Deployment Status")
     status = current_schema_status()
     c1, c2, c3, c4 = st.columns(4)
@@ -2355,7 +2392,27 @@ def render_deployment_status_page():
 
     st.caption("Table checks use the service role when configured; otherwise they use the anon key and may show restricted tables.")
     rows = [check_supabase_table(table) for table in CORE_TABLES]
+    table_summary = summarize_table_checks(rows)
+    s1, s2, s3, s4 = st.columns(4)
+    s1.metric("Reachable tables", table_summary.get("ok", 0))
+    s2.metric("Missing tables", table_summary.get("missing", 0))
+    s3.metric("Restricted tables", table_summary.get("restricted", 0))
+    s4.metric("Errors", table_summary.get("error", 0))
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    st.subheader("Schema Drift")
+    column_rows = check_supabase_columns()
+    column_summary = summarize_column_checks(column_rows)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Columns OK", column_summary.get("ok", 0))
+    c2.metric("Missing columns", column_summary.get("missing", 0))
+    c3.metric("Restricted columns", column_summary.get("restricted", 0))
+    c4.metric("Column errors", column_summary.get("error", 0))
+    drift_rows = [row for row in column_rows if row.get("status") not in {"ok", "demo mode"}]
+    if drift_rows:
+        st.dataframe(pd.DataFrame(drift_rows), use_container_width=True, hide_index=True)
+    else:
+        st.caption("No required-column drift detected.")
 
     migrations = fetch_schema_migrations_db()
     if migrations:
@@ -2363,6 +2420,18 @@ def render_deployment_status_page():
         st.dataframe(pd.DataFrame(migrations), use_container_width=True, hide_index=True)
     else:
         st.caption("No schema migration tracking rows are readable yet.")
+
+
+def render_admin_schema_alert():
+    if not admin_dashboard_mode or not SUPABASE_ON:
+        return
+    status = current_schema_status()
+    if status.get("ok"):
+        return
+    st.warning(
+        f"{status['label']}. Apply the latest `supabase_setup.sql` before launch so live "
+        "marketplace tables, RLS policies, and diagnostics match this app version."
+    )
 
 
 def rep_score(rep: dict, rating: float | None = None) -> int:
@@ -2693,6 +2762,8 @@ elif public_seo_mode:
 else:
     st.title("🛍️ Find a Rep · Best Deals")
     st.caption("Tell us what you need and where — matched reps compete on their offer, rating, and response time.")
+
+render_admin_schema_alert()
 
 # ---- Sidebar controls (per audience) ----
 product_profile = next(iter(PRODUCT_PROFILES))

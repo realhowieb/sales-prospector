@@ -64,8 +64,8 @@ lead details are private (service-role only) and reps are notified by email.
    from = "leads@hsfinest.ai"
    ```
 5. Reload, then open **🩺 Deployment Status** in the sidebar to confirm the app version, schema
-   version, and required table checks. Empty at first — use **Load sample reps** once, or let real
-   reps/companies register.
+   version, required tables, and required columns. Empty at first — use **Load sample reps** once,
+   or let real reps/companies register.
 
 Each layer degrades gracefully: no `[smtp]` → data still saves, no email; no `service_key` →
 live writes are read-only; no `[supabase]` → session/demo mode. The app never white-screens on
@@ -83,8 +83,9 @@ missing config — it does as much as it's configured to do.
   territory intelligence.
 - **Mobile:** long result lists are paginated ("Show more") and the map is collapsed by default,
   so scrolling stays smooth on phones.
-- **Deployment status:** the sidebar includes a diagnostics page for Supabase table reachability,
-  schema migration version, app version, and service-role configuration.
+- **Deployment status:** the sidebar includes an admin-gated diagnostics page for Supabase table
+  reachability, required-column drift, schema migration version, app version, and service-role
+  configuration.
 
 ## Run locally
 ```bash
@@ -93,6 +94,14 @@ python3 -m venv .venv
 ./.venv/bin/pip install -r requirements.txt
 ./.venv/bin/streamlit run app.py
 ```
+
+## Validate before deploy
+```bash
+python3 scripts/production_smoke.py
+```
+
+The smoke check compiles the Streamlit app and core modules, then runs the unit test suite.
+GitHub Actions runs the same smoke check on pushes and pull requests to `main`.
 
 ## Deploy (Streamlit Cloud)
 Point a new app at `sales_prospector/app.py` with this folder's `requirements.txt`. Runs in demo
