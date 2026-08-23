@@ -44,18 +44,66 @@ from connection_requests import (
     duplicate_open_connection,
     normalize_connection_status,
 )
-from deployment_status import (
-    APP_VERSION,
-    CORE_TABLES,
-    REQUIRED_SCHEMA_VERSION,
-    add_migration_hints,
-    expected_columns_for,
-    migration_hint_for,
-    schema_status,
-    summarize_column_checks,
-    summarize_table_checks,
-    table_order_for,
-)
+try:
+    from deployment_status import (
+        APP_VERSION,
+        CORE_TABLES,
+        REQUIRED_SCHEMA_VERSION,
+        add_migration_hints,
+        expected_columns_for,
+        migration_hint_for,
+        schema_status,
+        summarize_column_checks,
+        summarize_table_checks,
+        table_order_for,
+    )
+    DEPLOYMENT_STATUS_IMPORT_ERROR = ""
+except Exception as exc:
+    DEPLOYMENT_STATUS_IMPORT_ERROR = str(exc)
+    APP_VERSION = "2026.08.21"
+    REQUIRED_SCHEMA_VERSION = "020"
+    CORE_TABLES = [
+        "reps", "leads", "reviews", "pipeline_entries", "companies",
+        "opportunities", "profile_claims", "connections", "shortlist_items",
+        "account_profiles", "admin_account_roles", "content_reports",
+        "marketplace_events", "schema_migrations", "admin_audit_log",
+    ]
+
+    def schema_status(rows: list[dict], required: str = REQUIRED_SCHEMA_VERSION) -> dict:
+        versions = [
+            "".join(ch for ch in str(row.get("version") or "") if ch.isdigit()).zfill(3)
+            for row in rows
+        ]
+        current = max([version for version in versions if version], default="")
+        required_norm = "".join(ch for ch in str(required or "") if ch.isdigit()).zfill(3)
+        return {
+            "current": current,
+            "required": required_norm,
+            "ok": bool(current and current >= required_norm),
+            "label": "Schema current" if current and current >= required_norm else "Schema tracking not installed",
+        }
+
+    def table_order_for(table: str) -> str:
+        return "version.desc" if table == "schema_migrations" else "created_at.desc"
+
+    def _summarize_checks(rows: list[dict]) -> dict:
+        counts = {"ok": 0, "missing": 0, "restricted": 0, "error": 0, "demo mode": 0}
+        for row in rows:
+            status = str(row.get("status") or "error")
+            counts[status] = counts.get(status, 0) + 1
+        return counts
+
+    summarize_table_checks = _summarize_checks
+    summarize_column_checks = _summarize_checks
+
+    def expected_columns_for(table: str) -> list[str]:
+        return []
+
+    def migration_hint_for(table: str) -> str:
+        return "Run supabase_setup.sql."
+
+    def add_migration_hints(rows: list[dict]) -> list[dict]:
+        return [dict(row, fix=migration_hint_for(str(row.get("table") or ""))) for row in rows]
 from prospecting_core import (
     PRODUCT_PROFILES,
     bbox_center,
@@ -2380,6 +2428,11 @@ def render_deployment_status_page():
         return
 
     st.subheader("Deployment Status")
+    if DEPLOYMENT_STATUS_IMPORT_ERROR:
+        st.warning(
+            "Deployment diagnostics loaded in fallback mode because `deployment_status.py` "
+            f"could not be imported: {DEPLOYMENT_STATUS_IMPORT_ERROR}"
+        )
     status = current_schema_status()
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("App version", APP_VERSION)
@@ -2604,8 +2657,26 @@ def render_verified_review_page(token: str):
 st.markdown(
     """
     <style>
-      .block-container {padding-top: 1.4rem; max-width: 1400px;}
-      .prospect {border:1px solid rgba(128,128,128,.25); border-radius:12px; padding:14px 16px; margin-bottom:12px;}
+      :root {
+        --tp-ink:#17211f;
+        --tp-muted:#5d6b66;
+        --tp-soft:#eef4f1;
+        --tp-line:rgba(38,52,48,.14);
+        --tp-accent:#0e5a54;
+        --tp-blue:#22577a;
+        --tp-gold:#b67a1e;
+      }
+      .block-container {padding-top: 1.15rem; max-width: 1360px;}
+      section[data-testid="stSidebar"] div[data-testid="stVerticalBlock"] {gap:.55rem;}
+      section[data-testid="stSidebar"] .stRadio label {font-weight:650;}
+      div[data-testid="stMetric"] {
+        border:1px solid var(--tp-line);
+        border-radius:8px;
+        padding:10px 12px;
+        background:rgba(255,255,255,.035);
+      }
+      div[data-testid="stMetricLabel"] {color:var(--tp-muted);}
+      .prospect {border:1px solid rgba(128,128,128,.25); border-radius:10px; padding:14px 16px; margin-bottom:12px;}
       .pname {font-size:1.05rem; font-weight:700; line-height:1.2;}
       .pmeta {color:#7d8a86; font-size:.85rem;}
       .badge {display:inline-block; font-size:.72rem; font-weight:600; padding:2px 8px;
@@ -2613,8 +2684,11 @@ st.markdown(
       .b-hot {background:#c6432a22; color:#c6432a;} .b-warm {background:#b67a1e22; color:#b67a1e;}
       .b-cool {background:#3e7c6422; color:#3e7c64;} .b-gap {background:#c9781f22; color:#c9781f;}
       .b-verified {background:#0e5a5422; color:#0e5a54;} .b-new {background:#b67a1e22; color:#b67a1e;}
-      .rep-card {border:1px solid rgba(128,128,128,.24); border-radius:8px; padding:16px; margin-bottom:14px;
-                 background:rgba(255,255,255,.02);}
+      .rep-card {border:1px solid var(--tp-line); border-radius:8px; padding:16px; margin-bottom:14px;
+                 background:rgba(255,255,255,.04); box-shadow:0 1px 0 rgba(0,0,0,.03);}
+      .rep-card:hover {border-color:rgba(14,90,84,.35); box-shadow:0 8px 22px rgba(15,38,34,.06);}
+      .company-card {border-left:4px solid var(--tp-blue);}
+      .opportunity-card {border-left:4px solid var(--tp-gold);}
       .rep-head {display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:8px;}
       .rep-name {font-size:1.12rem; font-weight:750; line-height:1.15;}
       .rep-company {color:#7d8a86; font-size:.84rem; margin-top:2px;}
@@ -2632,6 +2706,14 @@ st.markdown(
       .rep-field-label {color:#7d8a86; font-size:.68rem; font-weight:700; letter-spacing:.06em; text-transform:uppercase;}
       .rep-field-value {font-size:.86rem; line-height:1.35;}
       .rep-links a {font-size:.86rem; font-weight:650; text-decoration:none;}
+      .result-strip {display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:.35rem 0 1rem;}
+      .filter-pill {font-size:.78rem; font-weight:650; border:1px solid var(--tp-line); border-radius:999px;
+                    padding:4px 10px; background:rgba(14,90,84,.07); color:var(--tp-accent);}
+      .empty-state {border:1px dashed rgba(93,107,102,.42); border-radius:8px; padding:18px;
+                    background:rgba(238,244,241,.48); margin:12px 0 18px;}
+      .empty-title {font-weight:800; font-size:1.03rem; margin-bottom:4px;}
+      .empty-body {color:var(--tp-muted); line-height:1.45; margin-bottom:8px;}
+      .empty-list {margin:0; padding-left:18px; color:var(--tp-muted); font-size:.9rem;}
       .deal {margin:8px 0 4px; padding:9px 12px; border-radius:9px; font-weight:600; font-size:.9rem;
              background:linear-gradient(90deg,#c9781f22,#0e5a5411); border:1px solid #c9781f44; color:inherit;}
       .deal b {color:#c9781f;}
@@ -2643,20 +2725,24 @@ st.markdown(
       .home-kicker {font-size:.78rem; font-weight:800; letter-spacing:.08em; text-transform:uppercase; color:#0e5a54;}
       .home-title {font-size:clamp(2.1rem, 4vw, 4.2rem); font-weight:850; line-height:1.02; margin:8px 0 10px;}
       .home-subtitle {font-size:1.05rem; color:#53615d; max-width:760px; line-height:1.5;}
-      .home-path {border:1px solid rgba(128,128,128,.24); border-radius:8px; padding:18px; background:#fff; min-height:160px;}
+      .home-path {border:1px solid var(--tp-line); border-radius:8px; padding:18px; background:rgba(255,255,255,.05); min-height:160px;}
       .home-path-title {font-size:.75rem; font-weight:800; letter-spacing:.08em; text-transform:uppercase; color:#7d8a86;}
       .home-path-action {font-size:1.45rem; font-weight:800; margin:6px 0;}
       .home-section {margin-top:28px;}
       .home-section h3 {font-size:1.15rem; margin-bottom:4px;}
       .home-muted {color:#53615d; line-height:1.45;}
       .home-mini-grid {display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px;}
-      .home-mini {border:1px solid rgba(128,128,128,.22); border-radius:8px; padding:12px; background:#fff;}
+      .home-mini {border:1px solid var(--tp-line); border-radius:8px; padding:12px; background:rgba(255,255,255,.05);}
       .home-mini-title {font-weight:750;}
       .home-count {font-size:1.6rem; font-weight:850; color:#0e5a54;}
       @media (max-width: 700px) {
+        .block-container {padding: .85rem .9rem 2rem;}
         .rep-head {display:block;}
         .rep-grid {grid-template-columns:1fr;}
         .rep-card {padding:13px;}
+        .matchbox {margin-bottom:10px;}
+        .result-strip {gap:6px;}
+        .filter-pill {font-size:.72rem;}
         .home-mini-grid {grid-template-columns:1fr;}
       }
     </style>
@@ -2668,10 +2754,33 @@ if review_token_from_url:
     render_verified_review_page(review_token_from_url)
     st.stop()
 
+
+def render_filter_pills(labels: list[str], empty_text: str = ""):
+    if not labels:
+        if empty_text:
+            st.caption(empty_text)
+        return
+    pills = "".join(f'<span class="filter-pill">{h(label)}</span>' for label in labels)
+    st.markdown(f'<div class="result-strip">{pills}</div>', unsafe_allow_html=True)
+
+
+def render_empty_state(title: str, body: str, suggestions: list[str] | None = None):
+    items = "".join(f"<li>{h(item)}</li>" for item in (suggestions or []))
+    st.markdown(
+        f'<div class="empty-state">'
+        f'<div class="empty-title">{h(title)}</div>'
+        f'<div class="empty-body">{h(body)}</div>'
+        + (f'<ul class="empty-list">{items}</ul>' if items else "")
+        + '</div>',
+        unsafe_allow_html=True,
+    )
+
+
 # ---- Audience switch (who's using the app right now) ----
 render_auth_panel()
 with st.sidebar:
     st.divider()
+    st.caption("Workspace")
     audience_options = [
         "🏠 Home",
         "🧭 Sales rep — find customers",
@@ -2685,9 +2794,8 @@ with st.sidebar:
     if LIVE_WRITES_ON:
         audience_options.append("🛡️ Admin Dashboard")
     audience = st.radio(
-        "I am a…",
+        "Navigation",
         audience_options,
-        label_visibility="collapsed",
         key="audience_mode",
 )
 home_mode = audience.startswith("🏠")
@@ -3672,7 +3780,15 @@ def collection_label_for(target_type: str, target_id) -> str:
 def render_saved_reps_page():
     saved_ids = shortlist_targets("rep")
     if not saved_ids:
-        st.info("No saved reps yet. Use Save on rep cards or profiles to build a shortlist.")
+        render_empty_state(
+            "No saved reps yet",
+            "Build a shortlist while reviewing representative cards and profiles.",
+            [
+                "Use Save on rep cards for quick comparison.",
+                "Use Strong Candidates for reps you want to contact soon.",
+                "Saved reps stay in this browser session until account-based saving is enabled.",
+            ],
+        )
         return
     summary = reviews_summary(all_reviews())
     reps = [
@@ -3700,7 +3816,14 @@ def render_saved_opportunities_page():
 
     st.subheader(f"{len(opportunities)} saved opportunities")
     if not opportunities:
-        st.info("No saved opportunities yet. Use Save on opportunity cards or detail pages.")
+        render_empty_state(
+            "No saved opportunities yet",
+            "Save product-line openings you want to revisit or compare later.",
+            [
+                "Browse Opportunities and use Save on any promising posting.",
+                "View an opportunity detail page before saving if you need the full context.",
+            ],
+        )
     for opportunity in opportunities:
         st.caption(collection_label_for("opportunity", opportunity.get("id")))
         opportunity_card(opportunity, companies_by_id, compare_rep)
@@ -3708,7 +3831,11 @@ def render_saved_opportunities_page():
     st.divider()
     st.subheader(f"{len(companies)} saved companies")
     if not companies:
-        st.caption("No saved companies yet.")
+        render_empty_state(
+            "No saved companies yet",
+            "Save company profiles you may want to contact later.",
+            ["Browse the Company Directory and use Contact Later on promising companies."],
+        )
     for company in companies:
         st.caption(collection_label_for("company", company.get("id")))
         company_card(company)
@@ -4175,10 +4302,10 @@ def render_marketplace():
         st.warning("Live marketplace is read-only until `[supabase].service_key` is configured for server-side submissions.")
     st.subheader(f"{len(matched)} reps found")
     filter_labels = active_filter_labels(cust_filters)
-    if filter_labels:
-        st.caption("Filters: " + " · ".join(filter_labels))
-    else:
-        st.caption("Showing active marketplace reps. Add filters in the sidebar to narrow the list.")
+    render_filter_pills(
+        filter_labels,
+        "Showing active marketplace reps. Add filters in the sidebar to narrow the list.",
+    )
 
     if SUPABASE_ON and not roster:
         st.info("The live marketplace has no reps yet. Be the first to list yourself below — "
@@ -4192,9 +4319,11 @@ def render_marketplace():
                 st.error(f"Couldn't load samples: {exc}")
 
     if not matched:
-        st.info("No reps match those filters yet.")
-        for suggestion in empty_search_suggestions(cust_filters):
-            st.caption(f"- {suggestion}")
+        render_empty_state(
+            "No reps match those filters yet",
+            "The marketplace is working, but the current filter mix is too narrow.",
+            empty_search_suggestions(cust_filters),
+        )
     else:
         fast = sum(1 for m in matched if float(m[0].get("response_time_hours") or RESPONSE_HOURS.get(m[0].get("response"), 24)) <= 2)
         m1, m2, m3 = st.columns(3)
@@ -4694,7 +4823,7 @@ def company_card(company: dict):
     badges += f'<span class="badge rep-badge-category">{h(compact_text(company.get("categories"), 3, "Categories not listed"))}</span>'
     badges += f'<span class="badge rep-badge-territory">{h(compact_text(company.get("metros_needed") or company.get("states_needed"), 3, "Territories flexible"))}</span>'
     st.markdown(
-        f'<div class="rep-card">'
+        f'<div class="rep-card company-card">'
         f'<div class="rep-name">{h(company.get("name") or "Company")}</div>'
         f'<div class="rep-company">{h(company.get("company_size") or "Size not listed")}'
         + (f' · {h(company.get("headquarters"))}' if company.get("headquarters") else "")
@@ -5349,7 +5478,7 @@ def opportunity_card(opportunity: dict, companies_by_id: dict, compare_rep: dict
         badges += f'<span class="badge rep-badge-category">{h(compact_text(opportunity.get("categories"), 3, "Category flexible"))}</span>'
         badges += f'<span class="badge rep-badge-territory">{h(opportunity_territory_text(opportunity))}</span>'
         st.markdown(
-            f'<div class="rep-card">'
+            f'<div class="rep-card opportunity-card">'
             f'<div class="rep-name">{h(opportunity.get("title") or "Sales opportunity")}</div>'
             f'<div class="rep-company">{h(opportunity_company_name(opportunity, companies_by_id))}</div>'
             f'<div class="rep-badges">{badges}</div>'
@@ -5691,7 +5820,15 @@ def render_company_directory():
     with tab_browse:
         st.subheader(f"{len(opportunities)} sales opportunities")
         if not opportunities:
-            st.info("No opportunities match those filters yet. Broaden territory, category, compensation, or experience filters.")
+            render_empty_state(
+                "No opportunities match those filters yet",
+                "There are no active postings for this exact search.",
+                [
+                    "Broaden territory, category, compensation, or experience filters.",
+                    "Clear exclusive-territory if shared territories are acceptable.",
+                    "Check back after more companies post product-line openings.",
+                ],
+            )
         sorted_opps = sorted(
             opportunities,
             key=lambda o: (
@@ -5706,7 +5843,15 @@ def render_company_directory():
     with tab_detail_companies:
         st.subheader(f"{len(companies)} companies looking for reps")
         if not companies:
-            st.info("No company profiles match yet. Try clearing filters or check back after more companies join.")
+            render_empty_state(
+                "No company profiles match yet",
+                "No active company profiles fit the current company-directory filters.",
+                [
+                    "Clear territory or category filters.",
+                    "Browse opportunities instead, since some companies may only have postings.",
+                    "Check again after more companies join the marketplace.",
+                ],
+            )
         for company in companies:
             company_card(company)
         st.divider()
