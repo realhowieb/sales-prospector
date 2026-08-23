@@ -89,6 +89,24 @@ EXPECTED_TABLE_COLUMNS = {
     ],
 }
 
+TABLE_MIGRATION_HINTS = {
+    "reps": "Run supabase_setup.sql or migrations/005_rep_profiles.sql and migrations/006_rep_availability_preferences.sql.",
+    "leads": "Run supabase_setup.sql or migrations/001_initial_marketplace.sql.",
+    "reviews": "Run supabase_setup.sql or migrations/011_moderated_reviews.sql.",
+    "pipeline_entries": "Run supabase_setup.sql or migrations/003_pipeline_followups.sql.",
+    "companies": "Run supabase_setup.sql or migrations/007_company_profiles.sql.",
+    "opportunities": "Run supabase_setup.sql or migrations/008_sales_opportunities.sql.",
+    "profile_claims": "Run supabase_setup.sql or migrations/010_profile_claims.sql.",
+    "connections": "Run supabase_setup.sql or migrations/012_connections.sql.",
+    "shortlist_items": "Run supabase_setup.sql or migrations/013_shortlists.sql.",
+    "account_profiles": "Run supabase_setup.sql or migrations/014_auth_accounts_roles.sql.",
+    "admin_account_roles": "Run supabase_setup.sql or migrations/014_auth_accounts_roles.sql.",
+    "content_reports": "Run supabase_setup.sql or migrations/015_admin_dashboard_reports.sql.",
+    "marketplace_events": "Run supabase_setup.sql or migrations/018_marketplace_analytics.sql.",
+    "schema_migrations": "Run supabase_setup.sql or migrations/020_schema_tracking_and_admin_audit.sql.",
+    "admin_audit_log": "Run supabase_setup.sql or migrations/020_schema_tracking_and_admin_audit.sql.",
+}
+
 TABLE_ORDER_COLUMNS = {
     "schema_migrations": "version.desc",
     "admin_audit_log": "created_at.desc",
@@ -139,6 +157,19 @@ def summarize_table_checks(rows: list[dict]) -> dict:
 
 def expected_columns_for(table: str) -> list[str]:
     return EXPECTED_TABLE_COLUMNS.get(table, [])
+
+
+def migration_hint_for(table: str) -> str:
+    return TABLE_MIGRATION_HINTS.get(table, "Run supabase_setup.sql.")
+
+
+def add_migration_hints(rows: list[dict]) -> list[dict]:
+    hinted = []
+    for row in rows:
+        next_row = dict(row)
+        next_row["fix"] = migration_hint_for(str(row.get("table") or ""))
+        hinted.append(next_row)
+    return hinted
 
 
 def summarize_column_checks(rows: list[dict]) -> dict:

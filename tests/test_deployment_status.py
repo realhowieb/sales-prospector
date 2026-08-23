@@ -3,8 +3,10 @@ import unittest
 from deployment_status import (
     CORE_TABLES,
     REQUIRED_SCHEMA_VERSION,
+    add_migration_hints,
     expected_columns_for,
     latest_schema_version,
+    migration_hint_for,
     normalize_migration_version,
     schema_status,
     summarize_column_checks,
@@ -64,6 +66,16 @@ class DeploymentStatusTests(unittest.TestCase):
         self.assertIn("profile_slug", columns)
         self.assertIn("availability_status", columns)
         self.assertIn("profile_status", columns)
+
+    def test_migration_hints_cover_core_tables(self):
+        missing = [table for table in CORE_TABLES if migration_hint_for(table) == "Run supabase_setup.sql."]
+        self.assertEqual(missing, [])
+
+    def test_add_migration_hints(self):
+        rows = [{"table": "companies", "status": "missing"}]
+        hinted = add_migration_hints(rows)
+        self.assertIn("migrations/007_company_profiles.sql", hinted[0]["fix"])
+        self.assertNotIn("fix", rows[0])
 
     def test_summarize_column_checks(self):
         summary = summarize_column_checks([

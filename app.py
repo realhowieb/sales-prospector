@@ -48,7 +48,9 @@ from deployment_status import (
     APP_VERSION,
     CORE_TABLES,
     REQUIRED_SCHEMA_VERSION,
+    add_migration_hints,
     expected_columns_for,
+    migration_hint_for,
     schema_status,
     summarize_column_checks,
     summarize_table_checks,
@@ -2330,18 +2332,23 @@ def check_supabase_table(table: str) -> dict:
         timeout=12,
     )
     if r.status_code < 400:
-        return {"table": table, "status": "ok", "detail": "reachable"}
+        return {"table": table, "status": "ok", "detail": "reachable", "fix": ""}
     if r.status_code == 404 or "PGRST205" in r.text:
-        return {"table": table, "status": "missing", "detail": "not found in Supabase schema cache"}
+        return {
+            "table": table,
+            "status": "missing",
+            "detail": "not found in Supabase schema cache",
+            "fix": migration_hint_for(table),
+        }
     if r.status_code in (401, 403):
-        return {"table": table, "status": "restricted", "detail": "exists or unknown; not readable with configured key"}
-    return {"table": table, "status": "error", "detail": f"{r.status_code}: {r.text[:120]}"}
+        return {"table": table, "status": "restricted", "detail": "exists or unknown; not readable with configured key", "fix": ""}
+    return {"table": table, "status": "error", "detail": f"{r.status_code}: {r.text[:120]}", "fix": migration_hint_for(table)}
 
 
 @st.cache_data(ttl=60, show_spinner=False)
 def check_supabase_column(table: str, column: str) -> dict:
     if not SUPABASE_ON:
-        return {"table": table, "column": column, "status": "demo mode", "detail": "Supabase not configured"}
+        return {"table": table, "column": column, "status": "demo mode", "detail": "Supabase not configured", "fix": ""}
     headers = _sb_service_headers() if SUPABASE_SERVICE_KEY else _sb_headers()
     r = requests.get(
         f"{SUPABASE_URL}/rest/v1/{table}",
@@ -2350,14 +2357,14 @@ def check_supabase_column(table: str, column: str) -> dict:
         timeout=12,
     )
     if r.status_code < 400:
-        return {"table": table, "column": column, "status": "ok", "detail": "reachable"}
+        return {"table": table, "column": column, "status": "ok", "detail": "reachable", "fix": ""}
     if r.status_code == 404 or "PGRST205" in r.text:
-        return {"table": table, "column": column, "status": "missing", "detail": "table missing"}
+        return {"table": table, "column": column, "status": "missing", "detail": "table missing", "fix": migration_hint_for(table)}
     if r.status_code == 400 and ("42703" in r.text or "does not exist" in r.text):
-        return {"table": table, "column": column, "status": "missing", "detail": "column missing"}
+        return {"table": table, "column": column, "status": "missing", "detail": "column missing", "fix": migration_hint_for(table)}
     if r.status_code in (401, 403):
-        return {"table": table, "column": column, "status": "restricted", "detail": "not readable with configured key"}
-    return {"table": table, "column": column, "status": "error", "detail": f"{r.status_code}: {r.text[:120]}"}
+        return {"table": table, "column": column, "status": "restricted", "detail": "not readable with configured key", "fix": ""}
+    return {"table": table, "column": column, "status": "error", "detail": f"{r.status_code}: {r.text[:120]}", "fix": migration_hint_for(table)}
 
 
 def check_supabase_columns() -> list[dict]:
@@ -2398,7 +2405,7 @@ def render_deployment_status_page():
     s2.metric("Missing tables", table_summary.get("missing", 0))
     s3.metric("Restricted tables", table_summary.get("restricted", 0))
     s4.metric("Errors", table_summary.get("error", 0))
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(add_migration_hints(rows)), use_container_width=True, hide_index=True)
 
     st.subheader("Schema Drift")
     column_rows = check_supabase_columns()

@@ -65,7 +65,8 @@ lead details are private (service-role only) and reps are notified by email.
    ```
 5. Reload, then open **🩺 Deployment Status** in the sidebar to confirm the app version, schema
    version, required tables, and required columns. Empty at first — use **Load sample reps** once,
-   or let real reps/companies register.
+   or let real reps/companies register. If the page reports missing schema pieces, use the `fix`
+   column to see whether to run the full setup SQL or a specific migration file.
 
 Each layer degrades gracefully: no `[smtp]` → data still saves, no email; no `service_key` →
 live writes are read-only; no `[supabase]` → session/demo mode. The app never white-screens on
