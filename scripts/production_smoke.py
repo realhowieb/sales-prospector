@@ -20,6 +20,7 @@ PYTHON_FILES = [
     "connection_requests.py",
     "shortlists.py",
     "deployment_status.py",
+    "trigger_leads.py",
 ]
 
 
