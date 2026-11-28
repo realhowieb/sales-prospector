@@ -18,15 +18,33 @@ export default function AuthGate({ children }: { children: ReactNode }) {
   const isPublic = PUBLIC_PATHS.some((p) => pathname.startsWith(p) || `${pathname}/` === p);
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => {
-      setSession(data.session);
+    // Never leave the app on "Loading…": if the saved session can't be read or refreshed (stale token,
+    // network hiccup), drop it locally and fall through to sign-in.
+    let settled = false;
+    const finish = (s: Session | null) => {
+      if (settled) return;
+      settled = true;
+      setSession(s);
       setReady(true);
-    });
+    };
+    const giveUp = () => {
+      supabase.auth.signOut({ scope: "local" }).catch(() => {});
+      finish(null);
+    };
+    supabase.auth
+      .getSession()
+      .then(({ data, error }) => (error ? giveUp() : finish(data.session)))
+      .catch(giveUp);
+    const timer = setTimeout(() => !settled && giveUp(), 8000);
     const { data } = supabase.auth.onAuthStateChange((event, s) => {
       setSession(s);
+      if (event === "INITIAL_SESSION" || event === "SIGNED_IN") finish(s);
       if (event === "PASSWORD_RECOVERY") router.replace("/reset/");
     });
-    return () => data.subscription.unsubscribe();
+    return () => {
+      clearTimeout(timer);
+      data.subscription.unsubscribe();
+    };
   }, [router]);
 
   useEffect(() => {
