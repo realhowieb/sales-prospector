@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import LeadTable, { ExtLink, ScoreBar, type Column } from "@/components/LeadTable";
 import { api, type Options } from "@/lib/api";
+import { useTrade } from "@/lib/trades";
 
 type Row = Record<string, unknown>;
 type Source = "permits" | "licenses" | "news" | "map";
@@ -12,7 +13,7 @@ const SOURCES: { id: Source; label: string; blurb: string }[] = [
     id: "permits",
     label: "🏗️ Build-outs & move-ins",
     blurb:
-      "Commercial building permits: tenant improvements (TI) and Use & Occupancy (U&O) certificates. A company files these weeks before it moves in — while it is still choosing alarm, camera and access-control vendors. Palo Alto for now; more cities as their data becomes available.",
+      "Commercial building permits: tenant improvements (TI) and Use & Occupancy (U&O) certificates. A company files these weeks before it moves in — while it is still choosing vendors for the new space. Palo Alto for now; more cities as their data becomes available.",
   },
   {
     id: "licenses",
@@ -37,6 +38,8 @@ const money = (v: unknown) =>
   typeof v === "number" ? `$${v >= 1e6 ? `${(v / 1e6).toFixed(1)}M` : v >= 1e3 ? `${Math.round(v / 1e3)}K` : v}` : "";
 const hotSignal = (s: unknown) => /^(Move|Build)/.test(String(s));
 
+const pitchCol: Column<Row> = { key: "Pitch", label: "Pitch", className: "wrap" };
+
 const permitCols: Column<Row>[] = [
   { key: "Score", label: "Score", render: (r) => <ScoreBar value={Number(r.Score)} /> },
   { key: "Opened", label: "Filed", className: "nowrap" },
@@ -45,6 +48,7 @@ const permitCols: Column<Row>[] = [
   { key: "Address", label: "Address", className: "nowrap", render: (r) => <ExtLink href={r.Map as string} label={String(r.Address)} /> },
   { key: "Value", label: "Job value", className: "nowrap", render: (r) => money(r.Value) },
   { key: "Status", label: "Status", className: "nowrap" },
+  pitchCol,
   {
     key: "Description", label: "What they're doing", className: "wrap",
     render: (r) => {
@@ -60,6 +64,7 @@ const permitCols: Column<Row>[] = [
 const licenseCols: Column<Row>[] = [
   { key: "Score", label: "Score", render: (r) => <ScoreBar value={Number(r.Score)} /> },
   { key: "Business", label: "Business", className: "name" },
+  pitchCol,
   { key: "Person to ask for", label: "Ask for" },
   { key: "Phone", label: "Phone", className: "nowrap" },
   { key: "Email", label: "Email", render: (r) => (r.Email ? <a href={`mailto:${r.Email}`}>{String(r.Email)}</a> : null) },
@@ -78,6 +83,7 @@ const newsCols: Column<Row>[] = [
   { key: "Signal", label: "Signal", render: (r) => <span className="tag hot">{String(r.Signal)}</span> },
   { key: "City", label: "City", className: "nowrap" },
   { key: "Headline", label: "Headline", className: "wrap", render: (r) => <ExtLink href={r.Link as string} label={String(r.Headline)} /> },
+  pitchCol,
   { key: "Source", label: "Source" },
 ];
 
@@ -86,6 +92,7 @@ const mapCols: Column<Row>[] = [
   { key: "Added", label: "Added", className: "nowrap" },
   { key: "Business", label: "Business", className: "name" },
   { key: "Kind", label: "Kind" },
+  pitchCol,
   { key: "Address", label: "Address", className: "nowrap" },
   { key: "Phone", label: "Phone", className: "nowrap" },
   { key: "Email", label: "Email", render: (r) => (r.Email ? <a href={`mailto:${r.Email}`}>{String(r.Email)}</a> : null) },
@@ -98,6 +105,7 @@ const DAYS: Record<Source, number[]> = { permits: [30, 60, 90, 180, 365], licens
 const DEFAULT_DAYS: Record<Source, number> = { permits: 90, licenses: 180, news: 30, map: 60 };
 
 export default function TriggerLeads() {
+  const trade = useTrade();
   const [opts, setOpts] = useState<Options | null>(null);
   const [territory, setTerritory] = useState("");
   const [custom, setCustom] = useState("");
@@ -118,6 +126,8 @@ export default function TriggerLeads() {
       })
       .catch((e) => setError((e as Error).message));
   }, []);
+
+  useEffect(() => setRows(null), [trade.id]); // re-run the search for the new ranking
 
   const cities = territory === "custom" ? custom : territory;
   const cityList = territory === "custom" ? custom.split(",").map((c) => c.trim()).filter(Boolean) : opts?.territories[territory] ?? [];
@@ -157,7 +167,7 @@ export default function TriggerLeads() {
   return (
     <div className="page">
       <h1>Trigger Leads</h1>
-      <p className="lede">Businesses opening, moving or changing hands — the moment they buy alarms, cameras, access control and services.</p>
+      <p className="lede">Businesses opening, moving or changing hands — the moment they buy {trade.sells}. Ranked for {trade.emoji} {trade.label}.</p>
 
       <div className="panel">
         <div className="controls">
@@ -242,7 +252,7 @@ export default function TriggerLeads() {
                 name: String(r.Business || r.Address), category: String(r.Signal),
                 note: [
                   `${r.Signal} filed ${r.Opened}`, `${r.Address}, ${r.City}`, r.Value ? `Job ${money(r.Value)}` : "",
-                  r.Contractor ? `Contractor: ${r.Contractor}` : "", `Permit ${r["Permit #"]}`, String(r.Description).slice(0, 300),
+                  r.Contractor ? `Contractor: ${r.Contractor}` : "", `Permit ${r["Permit #"]}`, r.Pitch ? `Pitch: ${r.Pitch}` : "", String(r.Description).slice(0, 300),
                 ].filter(Boolean).join(" · "),
               })} />
           ) : source === "licenses" ? (
@@ -250,7 +260,7 @@ export default function TriggerLeads() {
               rowId={(r) => `abc-${r["ABC file #"]}`}
               toPipeline={(r) => ({
                 name: String(r.Business), category: String(r.Type),
-                note: [r.Trigger, `${r.Address}, ${r.City}`, r.Phone, r.Email, `Owner: ${r["Person to ask for"] || r.Owner}`].filter(Boolean).join(" · "),
+                note: [r.Trigger, `${r.Address}, ${r.City}`, r.Phone, r.Email, `Owner: ${r["Person to ask for"] || r.Owner}`, r.Pitch && `Pitch: ${r.Pitch}`].filter(Boolean).join(" · "),
               })} />
           ) : source === "news" ? (
             <LeadTable rows={rows} columns={newsCols} csvName="news_leads.csv"

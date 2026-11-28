@@ -21,7 +21,7 @@ export default function Discover() {
   const [metro, setMetro] = useState("");
   const [area, setArea] = useState("");
   const [cats, setCats] = useState<string[]>([]);
-  const [profile, setProfile] = useState("Security systems");
+  const [profile, setProfile] = useState("");
   const [rows, setRows] = useState<Row[] | null>(null);
   const [label, setLabel] = useState("");
   const [loading, setLoading] = useState(false);
@@ -33,7 +33,7 @@ export default function Discover() {
         setOpts(o);
         setMetro(o.metros[0] ?? "");
         setCats(o.categories.slice(0, 3));
-        if (!o.profiles.includes("Security systems")) setProfile(o.profiles[0] ?? "");
+        // Empty = let the API pick the profile for the rep's trade.
       })
       .catch((e) => setError((e as Error).message));
   }, []);
@@ -74,6 +74,7 @@ export default function Discover() {
           <label>
             What do you sell?
             <select value={profile} onChange={(e) => setProfile(e.target.value)}>
+              <option value="">Match my trade</option>
               {opts?.profiles.map((p) => <option key={p}>{p}</option>)}
             </select>
           </label>

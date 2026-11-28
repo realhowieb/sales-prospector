@@ -21,7 +21,7 @@ PYTHON_FILES = [
     "shortlists.py",
     "deployment_status.py",
     "trigger_leads.py",
-    "discover_core.py", "permits.py",
+    "discover_core.py", "permits.py", "trades.py",
     "api/main.py",
     "api/auth.py",
     "api/pipeline.py", "api/digest.py",

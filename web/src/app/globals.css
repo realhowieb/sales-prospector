@@ -53,6 +53,7 @@ h2 { font-size: 1.1rem; margin: 0 0 8px; }
 .topbar nav a.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 .topbar nav a:hover { text-decoration: none; color: var(--text); }
 .account { display: flex; align-items: center; gap: 10px; }
+.account .trade-pick { width: auto; max-width: 210px; padding: 5px 8px; font-size: 0.85rem; }
 .account .email { font-size: 0.85rem; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 button, .button {

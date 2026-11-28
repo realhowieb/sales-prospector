@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
+import { saveTrade, TRADES, useTrade } from "@/lib/trades";
 import { useSession } from "./AuthGate";
 
 const LINKS = [
@@ -16,6 +17,7 @@ export default function Nav() {
   const session = useSession();
   const pathname = usePathname() ?? "/";
   const router = useRouter();
+  const trade = useTrade();
   if (!session) return null;
   return (
     <header className="topbar">
@@ -30,6 +32,18 @@ export default function Nav() {
         ))}
       </nav>
       <div className="account">
+        <select className="trade-pick" aria-label="What you sell" title="What you sell — leads are ranked for this"
+          value={trade.id}
+          onChange={async (e) => {
+            try {
+              await saveTrade(e.target.value);
+              router.refresh();
+            } catch (err) {
+              alert((err as Error).message);
+            }
+          }}>
+          {TRADES.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.label}</option>)}
+        </select>
         <span className="muted email">{session.user.email}</span>
         <button
           className="ghost"
