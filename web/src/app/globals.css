@@ -105,8 +105,11 @@ th { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; colo
 tr.picked td { background: var(--accent-soft); }
 td.check, th.check { width: 32px; }
 td.nowrap, th.nowrap { white-space: nowrap; }
-td.name { font-weight: 600; min-width: 160px; }
-td.wrap { min-width: 220px; }
+td.name { font-weight: 600; }
+td.name .cell { min-width: 150px; max-width: 260px; }
+td.wrap .cell { min-width: 240px; max-width: 420px; }
+@media (min-width: 1440px) { .page { max-width: 1600px; } }
+@media (min-width: 1900px) { .page { max-width: 1840px; } }
 .score { display: inline-flex; align-items: center; gap: 6px; }
 .score .bar { width: 48px; height: 6px; background: var(--bar); border-radius: 3px; overflow: hidden; }
 .score .bar span { display: block; height: 100%; background: var(--accent); }
