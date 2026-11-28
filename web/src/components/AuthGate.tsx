@@ -8,7 +8,7 @@ import { authConfigured, supabase } from "@/lib/supabase";
 const SessionContext = createContext<Session | null>(null);
 export const useSession = () => useContext(SessionContext);
 
-const PUBLIC_PATHS = ["/login/", "/reset/"];
+const PUBLIC_PATHS = ["/login/", "/reset/", "/welcome/", "/for/"];
 
 export default function AuthGate({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
@@ -30,12 +30,14 @@ export default function AuthGate({ children }: { children: ReactNode }) {
   }, [router]);
 
   useEffect(() => {
-    if (ready && !session && !isPublic) router.replace("/login/");
-  }, [ready, session, isPublic, router]);
+    if (ready && !session && !isPublic) router.replace(pathname === "/" ? "/welcome/" : "/login/");
+  }, [ready, session, isPublic, router, pathname]);
 
+  // Public pages render straight away (and into the static HTML, so search engines see them).
+  if (isPublic && !authConfigured) return <>{children}</>;
   if (!authConfigured) {
     return <div className="page"><div className="notice error">Sign-in isn&apos;t configured for this site yet.</div></div>;
   }
-  if (!ready || (!session && !isPublic)) return <div className="page"><p className="muted">Loading…</p></div>;
+  if (!isPublic && (!ready || !session)) return <div className="page"><p className="muted">Loading…</p></div>;
   return <SessionContext.Provider value={session}>{children}</SessionContext.Provider>;
 }

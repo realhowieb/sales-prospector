@@ -2,8 +2,9 @@
 
 import { useSession } from "@/components/AuthGate";
 
-export const PRICES = { month: 29, year: 290 };
-export const FREE_LIMITS = { leads: 10, pipeline: 25 };
+import { FREE_LIMITS, PRICES } from "./planData";
+
+export { FREE_LIMITS, PRICES };
 
 /** Pro if the account's app_metadata says so (set only by the server's Stripe webhook). */
 export function usePlan() {
