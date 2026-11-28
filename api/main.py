@@ -23,7 +23,7 @@ from datetime import date, timedelta
 import hmac
 
 import requests
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field
@@ -32,7 +32,7 @@ import discover_core
 import permits
 import trades
 import trigger_leads
-from api import digest
+from api import billing, digest
 from api import pipeline as pipe
 from api.auth import User, current_user, get_settings
 from api.cache import cached
@@ -194,6 +194,11 @@ DIGEST_LOADERS = {
 }
 
 
+def _leads_payload(user: User, extra: dict, rows: list[dict]) -> dict:
+    shown, limited = billing.limit_rows(rows, user.pro)
+    return {**extra, "count": len(rows), "leads": shown, "limited": limited}
+
+
 def _cities(territory: str) -> tuple[str, ...]:
     return parse_cities(territory)
 
@@ -218,7 +223,8 @@ def healthz() -> dict:
 
 @app.get("/v1/me")
 def me(user: User = Depends(current_user)) -> dict:
-    return {"id": user.id, "email": user.email}
+    return {"id": user.id, "email": user.email, "plan": "pro" if user.pro else "free",
+            "limits": None if user.pro else {"leads": billing.FREE_LEADS, "pipeline": billing.FREE_PIPELINE}}
 
 
 @app.get("/v1/options")
@@ -237,13 +243,15 @@ def options(user: User = Depends(current_user)) -> dict:
 def licenses(cities: tuple[str, ...] = Depends(parse_cities), days: int = Query(180, ge=30, le=365),
              hide_chains: bool = True, trade: str = trades.DEFAULT_TRADE, user: User = Depends(current_user)) -> dict:
     rows = trades.rescore("licenses", _chain_filter(_licenses(cities, days), hide_chains, "Chain"), trade)
-    return {"cities": cities, "count": len(rows), "leads": rows}
+    return _leads_payload(user, {"cities": cities}, rows)
 
 
 @app.post("/v1/leads/licenses/contacts")
 def license_contacts(cities: tuple[str, ...] = Depends(parse_cities), days: int = Query(180, ge=30, le=365),
                      hide_chains: bool = True, trade: str = trades.DEFAULT_TRADE,
                      user: User = Depends(current_user)) -> dict:
+    billing.require_pro(user.pro, "Phone & email lookup")
+
     def compute():
         leads = _licenses(cities, days)
         listings = overpass(trigger_leads.osm_contact_query(territory_bbox(cities)))
@@ -251,14 +259,14 @@ def license_contacts(cities: tuple[str, ...] = Depends(parse_cities), days: int 
 
     rows = trades.rescore("licenses", _chain_filter([dict(r) for r in cached(("contacts", cities, days), 24 * 3600,
                                                                              compute)], hide_chains, "Chain"), trade)
-    return {"cities": cities, "count": len(rows), "leads": rows}
+    return _leads_payload(user, {"cities": cities}, rows)
 
 
 @app.get("/v1/leads/news")
 def news_leads(cities: tuple[str, ...] = Depends(parse_cities), days: int = Query(30, ge=7, le=60),
                trade: str = trades.DEFAULT_TRADE, user: User = Depends(current_user)) -> dict:
     rows = trades.rescore("news", _news_rows(cities, days), trade)
-    return {"cities": cities, "count": len(rows), "leads": rows}
+    return _leads_payload(user, {"cities": cities}, rows)
 
 
 @app.get("/v1/leads/new-on-map")
@@ -267,7 +275,7 @@ def new_on_map(cities: tuple[str, ...] = Depends(parse_cities), days: int = Quer
                user: User = Depends(current_user)) -> dict:
     rows = trades.rescore("map", [r for r in _new_on_map_rows(cities, days)
                                   if not (hide_chains and r.get("Note") == "Chain")], trade)
-    return {"cities": cities, "count": len(rows), "leads": rows}
+    return _leads_payload(user, {"cities": cities}, rows)
 
 
 @app.get("/v1/leads/permits")
@@ -277,8 +285,8 @@ def permit_leads(cities: tuple[str, ...] = Depends(parse_cities), days: int = Qu
     covered = [c for c in cities if c in permits.COVERED_CITIES]
     rows = trades.rescore("permits", _chain_filter([dict(r) for r in _permit_rows(cities, days, include_minor)],
                                                    hide_chains, "Chain"), trade)
-    return {"cities": cities, "covered": covered, "not_covered": [c for c in cities if c not in covered],
-            "count": len(rows), "leads": rows}
+    return _leads_payload(user, {"cities": cities, "covered": covered,
+                                 "not_covered": [c for c in cities if c not in covered]}, rows)
 
 
 @app.get("/v1/discover")
@@ -306,7 +314,8 @@ def discover(metro: str = "", area: str = "", categories: str = Query(..., descr
     query = discover_core.build_query(bbox, cats, cap)
     elements = cached(("discover", query), 3600, lambda: discover_fetch(query))
     rows = discover_core.parse_listings(elements, profile)
-    return {"area": label, "count": len(rows), "prospects": rows}
+    shown, limited = billing.limit_rows(rows, user.pro)
+    return {"area": label, "count": len(rows), "prospects": shown, "limited": limited}
 
 
 class PipelineEntry(BaseModel):
@@ -329,6 +338,9 @@ def pipeline_put(prospect_id: str, entry: PipelineEntry, user: User = Depends(cu
                  settings: Settings = Depends(get_settings)) -> dict:
     if not prospect_id or len(prospect_id) > 200:
         raise HTTPException(422, "Bad prospect id.")
+    if not user.pro and not pipe.has_entry(settings, user, prospect_id) \
+            and pipe.count_entries(settings, user) >= billing.FREE_PIPELINE:
+        raise HTTPException(402, f"Free accounts can save {billing.FREE_PIPELINE} leads. Upgrade to Pro for unlimited.")
     data = entry.model_dump()
     data["next_follow_up"] = entry.next_follow_up.isoformat() if entry.next_follow_up else None
     return pipe.upsert_entry(settings, user, prospect_id, data)
@@ -358,6 +370,8 @@ def digest_get(user: User = Depends(current_user), settings: Settings = Depends(
 @app.put("/v1/digest")
 def digest_put(body: DigestSettings, user: User = Depends(current_user),
                settings: Settings = Depends(get_settings)) -> dict:
+    if body.active:
+        billing.require_pro(user.pro, "The weekly email")
     _cities(body.territory)  # 422 for an unusable territory
     sources = [s for s in body.sources if s in digest.SOURCES]
     if body.active and not sources:
@@ -369,6 +383,7 @@ def digest_put(body: DigestSettings, user: User = Depends(current_user),
 @app.post("/v1/digest/test")
 def digest_test(body: DigestSettings, user: User = Depends(current_user),
                 settings: Settings = Depends(get_settings)) -> dict:
+    billing.require_pro(user.pro, "The weekly email")
     _throttle(f"digest-test:{user.id}", 120)
     sources = [s for s in body.sources if s in digest.SOURCES] or list(digest.SOURCES)
     return digest.send_test(settings, user.email, body.territory, sources, DIGEST_LOADERS, _cities, body.trade)
@@ -380,3 +395,27 @@ def digest_run(x_digest_secret: str = Header(default=""), dry_run: bool = False,
     if not settings.digest_secret or not hmac.compare_digest(x_digest_secret, settings.digest_secret):
         raise HTTPException(403, "Forbidden.")
     return digest.run_all(settings, DIGEST_LOADERS, _cities, dry_run=dry_run)
+
+
+class CheckoutBody(BaseModel):
+    interval: str = Field("month", pattern="^(month|year)$")
+
+
+@app.post("/v1/billing/checkout")
+def billing_checkout(body: CheckoutBody, user: User = Depends(current_user),
+                     settings: Settings = Depends(get_settings)) -> dict:
+    if user.pro:
+        raise HTTPException(409, "You're already on Pro.")
+    return {"url": billing.checkout_url(settings, user.id, user.email, body.interval, user.customer_id)}
+
+
+@app.post("/v1/billing/portal")
+def billing_portal(user: User = Depends(current_user), settings: Settings = Depends(get_settings)) -> dict:
+    return {"url": billing.portal_url(settings, user.customer_id)}
+
+
+@app.post("/webhooks/stripe")
+async def stripe_webhook(request: Request, stripe_signature: str = Header(default=""),
+                         settings: Settings = Depends(get_settings)) -> dict:
+    event = billing.verify_signature(await request.body(), stripe_signature, settings.stripe_webhook_secret)
+    return {"result": billing.handle_event(settings, event)}

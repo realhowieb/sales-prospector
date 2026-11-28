@@ -19,6 +19,11 @@ class Settings:
     smtp_from: str = ""
     digest_secret: str = ""  # shared with the Monday scheduler
     web_url: str = "https://firstknock.hsfinest.com"
+    # Pro plan (Stripe) — optional; checkout answers 503 until set.
+    stripe_secret_key: str = ""
+    stripe_webhook_secret: str = ""
+    stripe_price_monthly: str = ""
+    stripe_price_yearly: str = ""
 
 
 def load_settings() -> Settings:
@@ -35,4 +40,8 @@ def load_settings() -> Settings:
         smtp_from=os.environ.get("SMTP_FROM", "FirstKnock <noreply@hsfinest.com>"),
         digest_secret=os.environ.get("DIGEST_SECRET", ""),
         web_url=os.environ.get("WEB_URL", "https://firstknock.hsfinest.com").rstrip("/"),
+        stripe_secret_key=os.environ.get("STRIPE_SECRET_KEY", ""),
+        stripe_webhook_secret=os.environ.get("STRIPE_WEBHOOK_SECRET", ""),
+        stripe_price_monthly=os.environ.get("STRIPE_PRICE_MONTHLY", ""),
+        stripe_price_yearly=os.environ.get("STRIPE_PRICE_YEARLY", ""),
     )

@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
+import { usePlan } from "@/lib/plan";
 import { saveTrade, TRADES, useTrade } from "@/lib/trades";
 import { useSession } from "./AuthGate";
 
@@ -18,6 +19,7 @@ export default function Nav() {
   const pathname = usePathname() ?? "/";
   const router = useRouter();
   const trade = useTrade();
+  const { pro } = usePlan();
   if (!session) return null;
   return (
     <header className="topbar">
@@ -32,6 +34,7 @@ export default function Nav() {
         ))}
       </nav>
       <div className="account">
+        <Link href="/account/" className={pro ? "plan-pill pro" : "plan-pill"}>{pro ? "Pro" : "⭐ Upgrade"}</Link>
         <select className="trade-pick" aria-label="What you sell" title="What you sell — leads are ranked for this"
           value={trade.id}
           onChange={async (e) => {

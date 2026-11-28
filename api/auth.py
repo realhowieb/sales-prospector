@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import requests
 from fastapi import Depends, Header, HTTPException
 
+from api import billing
 from api.cache import cached
 from api.settings import Settings, load_settings
 
@@ -14,6 +15,8 @@ from api.settings import Settings, load_settings
 class User:
     id: str
     email: str
+    pro: bool = False
+    customer_id: str = ""
 
 
 def get_settings() -> Settings:
@@ -36,4 +39,6 @@ def current_user(authorization: str = Header(default=""), settings: Settings = D
     data = cached(("user", token), 120, lambda: fetch_supabase_user(settings, token))
     if not data or not data.get("id"):
         raise HTTPException(401, "Your session expired. Sign in again.")
-    return User(id=data["id"], email=(data.get("email") or "").strip().lower())
+    meta = data.get("app_metadata") or {}
+    return User(id=data["id"], email=(data.get("email") or "").strip().lower(),
+                pro=billing.is_pro(meta), customer_id=meta.get("stripe_customer_id") or "")
