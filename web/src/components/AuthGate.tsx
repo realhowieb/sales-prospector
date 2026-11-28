@@ -28,7 +28,8 @@ export default function AuthGate({ children }: { children: ReactNode }) {
       setReady(true);
     };
     const giveUp = () => {
-      supabase.auth.signOut({ scope: "local" }).catch(() => {});
+      // On /reset/ the page handles the link itself, so don't wipe what it may be setting up.
+      if (!location.pathname.startsWith("/reset")) supabase.auth.signOut({ scope: "local" }).catch(() => {});
       finish(null);
     };
     supabase.auth
