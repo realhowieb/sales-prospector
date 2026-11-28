@@ -68,3 +68,48 @@ class PermitTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+SJ_CSV = '''"Status","gx_location","ASSESSORS_PARCEL_NUMBER","APPLICANT","OWNERNAME","CONTRACTOR","FOLDERNUMBER","FOLDERDESC","FOLDERNAME","SUBTYPEDESCRIPTION","WORKDESCRIPTION","PERMITAPPROVALS","ISSUEDATE","FINALDATE","DWELLINGUNITS","PERMITVALUATION","SQUAREFOOTAGE","FOLDERRSN"
+"Active","3000  ORCHARD PY  , SAN JOSE CA 95134-0000","1","","","ACME BUILDERS INC","2026-1-TI","Commercial/Industrial","ROSENDIN ELECTRIC (BEPM100%) TENANT IMPROVEMENT","Office","Tenant Improvement","","11/3/2026 12:00:00 AM","","0","10255535","0","1"
+"Active","1 MAIN ST  , SAN JOSE CA 95110-0000","2","","","SIGNCO","2026-2-SG","Commercial/Industrial","FIFTH THIRD BANK (BE 100%) ILLUMINATED SIGNS","Bank","Tenant Improvement","","11/9/2026 12:00:00 AM","","0","24000","0","2"
+"Active","2 MAIN ST  , SAN JOSE CA 95110-0000","3","","","","2026-3-CS","Commercial/Industrial","T-MOBILE (BE100%) ANTENNA CELL SITE","Antenna/Cell Site","Tenant Improvement","","11/13/2026 12:00:00 AM","","0","66000","0","3"
+"Active","3 MAIN ST  , SAN JOSE CA 95110-0000","4","","","","2026-4-RS","1 & 2 Family Detached Dwellings","SMITH KITCHEN","Single-Family","Additions/Alterations","","11/13/2026 12:00:00 AM","","0","66000","0","4"
+"Active","4 MAIN ST  , SAN JOSE CA 95110-0000","5","","","","2026-5-ST","Commercial/Industrial","(STAR) SRP (BEMP100%) TERIYAKI CITY GRILL #3","Restaurant","Tenant Improvement","","11/23/2026 12:00:00 AM","","0","85000","0","5"
+'''
+
+SF_ROWS = [
+    {"permit_number": "1", "permit_creation_date": "2026-11-18T00:00:00.000", "status": "filed",
+     "description": "tenant improvement coffee cafe. (e) restroom to remain", "estimated_cost": "175000.0",
+     "existing_use": "retail sales", "proposed_use": "food/beverage hndlng", "street_number": "2108",
+     "street_name": "Sutter", "street_suffix": "St"},
+    {"permit_number": "2", "permit_creation_date": "2026-11-20T00:00:00.000", "status": "issued",
+     "description": "17/f: tenant improvement minimal demolition of non-structural walls", "estimated_cost": "618000.0",
+     "existing_use": "office", "proposed_use": "office", "street_number": "101", "street_name": "02nd",
+     "street_suffix": "St"},
+    {"permit_number": "3", "permit_creation_date": "2026-11-20T00:00:00.000", "status": "issued",
+     "description": "kitchen remodel", "estimated_cost": "40000.0", "existing_use": "2 family dwelling",
+     "proposed_use": "2 family dwelling", "street_number": "9", "street_name": "Elm", "street_suffix": "St"},
+]
+
+
+class CityPermitTests(unittest.TestCase):
+    def test_san_jose_keeps_build_outs_drops_signs_towers_homes(self):
+        rows = permits.parse_san_jose(SJ_CSV, today=date(2026, 11, 27))
+        by = {r["Permit #"]: r for r in rows}
+        self.assertEqual(set(by), {"2026-1-TI", "2026-5-ST"})
+        self.assertEqual(by["2026-1-TI"]["Business"], "Rosendin Electric")
+        self.assertEqual(by["2026-1-TI"]["Address"], "3000 Orchard Py")
+        self.assertEqual(by["2026-1-TI"]["Contractor"], "Acme Builders Inc")
+        self.assertEqual(by["2026-5-ST"]["Business"], "Teriyaki City Grill #3")
+        self.assertIn("2026-2-SG", {r["Permit #"] for r in permits.parse_san_jose(SJ_CSV, today=date(2026, 11, 27),
+                                                                                 include_minor=True)})
+
+    def test_san_francisco_change_of_use_is_a_move_in(self):
+        rows = permits.parse_san_francisco(SF_ROWS, today=date(2026, 11, 27))
+        by = {r["Permit #"]: r for r in rows}
+        self.assertEqual(set(by), {"1", "2"})  # the 2-family home is skipped
+        self.assertEqual(by["1"]["Signal"], "Move-in (change of use)")
+        self.assertIn("retail sales → food/beverage hndlng", by["1"]["Description"])
+        self.assertEqual(by["2"]["Signal"], "Build-out (TI)")
+        self.assertEqual(by["2"]["Address"], "101 2nd St")

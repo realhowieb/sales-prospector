@@ -151,7 +151,8 @@ def bucket_of(source: str, row: dict) -> str:
 def _signal(source: str, row: dict) -> str:
     if source == "licenses":
         return "Pending license" if str(row.get("Trigger", "")).startswith("Pending") else "New license"
-    return str(row.get("Signal") or "")
+    signal = str(row.get("Signal") or "")
+    return "Move-in (U&O)" if signal.startswith("Move-in") else signal
 
 
 def rescore(source: str, rows: list[dict], trade: str | None) -> list[dict]:

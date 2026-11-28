@@ -8,6 +8,8 @@ Sources (free, no key):
 - Palo Alto: Development Center Permits on data.paloalto.gov (Junar). The city publishes the
   data in date-range slices; the newest slice's CSV id changes, so we read it off the dashboard
   page and fall back to the last known id.
+- San Jose: daily CSVs on data.sanjoseca.gov (last 30 days + all active permits).
+- San Francisco: DataSF building permits (Socrata API), filtered to commercial uses.
 
 Framework-free so the API and the Streamlit app can share it.
 """
@@ -26,7 +28,7 @@ PALO_ALTO_CSV = "https://data.paloalto.gov/rest/datastreams/{}/data.csv"
 PALO_ALTO_FALLBACK_ID = "298792"  # "Mar 2025-Nov 2026" slice
 
 # Cities we have permit data for (the rest of the territory is skipped and reported back).
-COVERED_CITIES = ("Palo Alto",)
+COVERED_CITIES = ("Palo Alto", "San Jose", "San Francisco")
 
 RESIDENTIAL = re.compile(
     r"^\s*(res|mf|mfr|sfr|multi-?fam\w*|residential|adu|jadu|duplex|townhome|condo)\b|"
@@ -129,16 +131,69 @@ def classify(description: str) -> tuple[str, int] | None:
     return None
 
 
-def parse_palo_alto(csv_text: str, today: date | None = None, days: int = 90,
-                    include_minor: bool = False) -> list[dict]:
-    """Palo Alto permit CSV -> scored lead rows, best first, one per permit."""
-    today = today or date.today()
-    since = today - timedelta(days=days)
-    rows: dict[str, dict] = {}
-    for rec in csv.DictReader(io.StringIO(csv_text.lstrip("\ufeff"))):
+# --------------------------------------------------------------------------- #
+# Shared scoring: every city adapter yields the same record shape
+# --------------------------------------------------------------------------- #
+FINISHED = {"Finaled", "Closed", "complete", "Complete", "Final", "Finaled/Closed"}
+CLOSED_OUT = {"Void", "Abandoned", "Withdrawn", "cancelled", "withdrawn", "expired", "Expired", "disapproved"}
+
+
+def tidy_address(addr: str) -> str:
+    """'101 02Nd St' -> '101 2nd St'."""
+    addr = re.sub(r"\b0+(\d)", r"\1", addr)
+    return re.sub(r"(\d)(St|Nd|Rd|Th)\b", lambda m: m.group(1) + m.group(2).lower(), addr)
+
+
+def score_record(rec: dict, today: date) -> dict:
+    """rec: permit, opened (date), signal, base, business, address, city, value, status, description,
+    contractor, map. -> lead row."""
+    score, notes = rec["base"], []
+    value = rec.get("value") or 0.0
+    if value > 10_000:
+        score += min(10, round(2 * math.log10(value / 10_000)))
+    score -= min(10, (today - rec["opened"]).days // 10)
+    if rec.get("status") in FINISHED:
+        score -= 8
+        notes.append("Work finished")
+    if MALL.search(rec["description"]):
+        score -= 10
+        notes.append("Mall tenant — may use a national vendor")
+    tenant = rec.get("business") or ""
+    chain = bool(tenant and CHAINS.search(tenant))
+    if chain:
+        notes.append("Chain")
+    return {
+        "Score": max(1, min(100, score)),
+        "Opened": rec["opened"].isoformat(),
+        "Signal": rec["signal"],
+        "Business": tenant,
+        "Address": tidy_address(rec["address"]),
+        "City": rec["city"],
+        "Value": round(value) if value >= 100 else None,
+        "Status": rec.get("status") or "",
+        "Description": rec["description"],
+        "Contractor": rec.get("contractor") or "",
+        "Permit #": rec["permit"],
+        "Note": " · ".join(notes),
+        "Chain": chain,
+        "Map": rec.get("map") or "https://www.google.com/maps/search/?api=1&query="
+        + re.sub(r"\s+", "+", f"{rec['address']}, {rec['city']}, CA"),
+    }
+
+
+def _finish(records, today: date) -> list[dict]:
+    rows = {r["permit"]: score_record(r, today) for r in records}
+    return sorted(rows.values(), key=lambda r: (r["Score"], r["Opened"]), reverse=True)
+
+
+# --------------------------------------------------------------------------- #
+# Palo Alto — data.paloalto.gov CSV
+# --------------------------------------------------------------------------- #
+def palo_alto_records(csv_text: str, since: date, include_minor: bool):
+    for rec in csv.DictReader(io.StringIO(csv_text.lstrip("﻿"))):
         desc = " ".join((rec.get("DESCRIPTION") or "").split())
         status = (rec.get("RECORD STATUS") or "").strip()
-        if not desc or status in {"Void", "Abandoned", "Withdrawn"}:
+        if not desc or status in CLOSED_OUT:
             continue
         try:
             opened = datetime.strptime(rec.get("DATE OPENED", ""), "%m/%d/%Y").date()
@@ -147,42 +202,157 @@ def parse_palo_alto(csv_text: str, today: date | None = None, days: int = 90,
         if opened < since:
             continue
         hit = classify(desc)
-        if not hit:
+        if not hit or (hit[0] == "Other commercial" and not include_minor):
             continue
-        signal, score = hit
-        if signal == "Other commercial" and not include_minor:
-            continue
-        value = money(rec.get("JOB VALUE", ""))
-        tenant = _clean_tenant(tenant_of(desc))
-        notes = []
-        if value >= 100:  # $1 placeholders on standalone U&Os
-            score += min(10, round(2 * math.log10(value / 10_000))) if value > 10_000 else 0
-        score -= min(10, (today - opened).days // 10)
-        if status in {"Finaled", "Closed"}:
-            score -= 8
-            notes.append("Work finished")
-        if MALL.search(desc):
-            score -= 10
-            notes.append("Mall tenant — may use a national vendor")
-        chain = bool(tenant and CHAINS.search(tenant))
-        if chain:
-            notes.append("Chain")
         addr = (rec.get("ADDR FULL LINE") or "").strip()
-        permit = (rec.get("RECORD ID") or "").strip()
-        rows[permit] = {
-            "Score": max(1, min(100, score)),
-            "Opened": opened.isoformat(),
-            "Signal": signal,
-            "Business": tenant,
-            "Address": re.sub(r",?\s*PALO ALTO,?\s*CA\s*\d*\s*$", "", addr, flags=re.I).title(),
-            "City": "Palo Alto",
-            "Value": round(value) if value >= 100 else None,
-            "Status": status,
-            "Description": desc,
-            "Contractor": (rec.get("BUSINESS NAME") or "").strip().title(),
-            "Permit #": permit,
-            "Note": " · ".join(notes),
-            "Chain": chain,
-            "Map": "https://www.google.com/maps/search/?api=1&query=" + re.sub(r"\s+", "+", addr),
+        value = money(rec.get("JOB VALUE", ""))
+        yield {
+            "permit": (rec.get("RECORD ID") or "").strip(), "opened": opened, "signal": hit[0], "base": hit[1],
+            "business": _clean_tenant(tenant_of(desc)),
+            "address": re.sub(r",?\s*PALO ALTO,?\s*CA\s*\d*\s*$", "", addr, flags=re.I).title(),
+            "city": "Palo Alto", "value": value if value >= 100 else 0.0,  # $1 placeholders on standalone U&Os
+            "status": status, "description": desc, "contractor": (rec.get("BUSINESS NAME") or "").strip().title(),
+            "map": "https://www.google.com/maps/search/?api=1&query=" + re.sub(r"\s+", "+", addr),
         }
-    return sorted(rows.values(), key=lambda r: (r["Score"], r["Opened"]), reverse=True)
+
+
+def parse_palo_alto(csv_text: str, today: date | None = None, days: int = 90,
+                    include_minor: bool = False) -> list[dict]:
+    """Palo Alto permit CSV -> scored lead rows, best first, one per permit."""
+    today = today or date.today()
+    return _finish(palo_alto_records(csv_text, today - timedelta(days=days), include_minor), today)
+
+
+# --------------------------------------------------------------------------- #
+# San Jose — data.sanjoseca.gov daily CSVs (active permits + last 30 days)
+# --------------------------------------------------------------------------- #
+SAN_JOSE_CSVS = [
+    "https://data.sanjoseca.gov/dataset/2723cdec-a639-4b63-bded-175338c45473/resource/"
+    "045b3678-e923-4002-b696-300955bc6d06/download/buildingpermits30.csv",
+    "https://data.sanjoseca.gov/dataset/fd9ceb0c-75e0-402e-9fe3-3f6e04f2c23f/resource/"
+    "761b7ae8-3be1-4ad6-923d-c7af6404a904/download/buildingpermitsactive.csv",
+]
+SJ_MINOR = re.compile(r"\b(sign|signs|signage|billboard|cell site|antenna|hvac|chiller|condenser|heat pump|"
+                      r"water heater|photovoltaic|\bpv\b|solar|reroof|re-roof|switch ?gear|feeder|parking lot|"
+                      r"pipe|tank|exhaust fan|ev charg|fence|demo\b|demolition|code violation|rack)\b", re.I)
+SJ_WORK = re.compile(r"\b(t\.?i|tenant|improvement|install\w*|replace\w*|upgrade|sign|demo|ada|restroom|"
+                     r"suite|ste|floor|landlord|shell|interior|electrical|mechanical|plumbing|service)\b", re.I)
+SJ_SKIP_USES = {"Antenna/Cell Site", "Church", "Temporary Use", "Survey", "Service Station"}
+SJ_PREFIX = re.compile(r"^\s*(\((star|e|b|m|p)\)\s*|srp\s+|epr\s+)+", re.I)
+
+
+def download_san_jose(session, user_agent: str, timeout: int = 120) -> str:
+    parts = []
+    for url in SAN_JOSE_CSVS:
+        r = session.get(url, headers={"User-Agent": user_agent}, timeout=timeout)
+        r.raise_for_status()
+        parts.append(r.content.decode("utf-8-sig", errors="replace"))
+    header = parts[0].splitlines()[0] if parts else ""
+    return "\n".join([parts[0]] + ["\n".join(p.splitlines()[1:]) for p in parts[1:] if p.splitlines()[:1] == [header]])
+
+
+def san_jose_records(csv_text: str, since: date, include_minor: bool):
+    for rec in csv.DictReader(io.StringIO(csv_text.lstrip("﻿"))):
+        if rec.get("FOLDERDESC") != "Commercial/Industrial":
+            continue
+        use, work = (rec.get("SUBTYPEDESCRIPTION") or "").strip(), (rec.get("WORKDESCRIPTION") or "").strip()
+        name = " ".join((rec.get("FOLDERNAME") or "").split())
+        if use in SJ_SKIP_USES:
+            continue
+        try:
+            opened = datetime.strptime((rec.get("ISSUEDATE") or "").split(" ")[0], "%m/%d/%Y").date()
+        except ValueError:
+            continue
+        if opened < since:
+            continue
+        if work == "New Construction":
+            signal, base = "New building", 80
+        elif work in ("Tenant Improvement", "Additions/Alterations", "Change of Occupancy"):
+            minor = SJ_MINOR.search(name)
+            if minor and not include_minor:
+                continue
+            signal, base = ("Other commercial", 50) if minor else ("Build-out (TI)", 88)
+        else:
+            continue
+        bare = SJ_PREFIX.sub("", name)
+        m = re.match(r"^(.*?)\s*\([^)]*\)\s*(.*)$", bare)  # "ALTERA (BEM 100%) TENANT IMPROVEMENT"
+        business = m.group(1).strip(" -") if m else ""
+        if m and not business and not SJ_WORK.search(m.group(2)):  # "SRP (BEMP100%) TERIYAKI CITY GRILL #3"
+            business = m.group(2).strip(" -")
+        business = re.sub(r"'S\b", "'s", business.title()) if business.isupper() else business
+        if business.lower() in {"market-ready", "master file", ""}:
+            business = ""
+        addr = re.sub(r"\s*,?\s*SAN JOSE\s*CA.*$", "", " ".join((rec.get("gx_location") or "").split()), flags=re.I)
+        yield {
+            "permit": (rec.get("FOLDERNUMBER") or "").strip(), "opened": opened, "signal": signal, "base": base,
+            "business": business, "address": addr.title(), "city": "San Jose",
+            "value": money(rec.get("PERMITVALUATION", "")), "status": (rec.get("Status") or "").strip(),
+            "description": f"{name} — {use}: {work}".strip(" —:"),
+            "contractor": " ".join((rec.get("CONTRACTOR") or "").split()).title(),
+        }
+
+
+def parse_san_jose(csv_text: str, today: date | None = None, days: int = 90,
+                   include_minor: bool = False) -> list[dict]:
+    today = today or date.today()
+    return _finish(san_jose_records(csv_text, today - timedelta(days=days), include_minor), today)
+
+
+# --------------------------------------------------------------------------- #
+# San Francisco — DataSF building permits (Socrata), commercial uses only
+# --------------------------------------------------------------------------- #
+SF_PERMITS = "https://data.sf.gov/resource/i98e-djp9.json"
+SF_SKIP_USES = re.compile(r"family|apartment|dwelling|residential|church|school|vacant lot|parking|storage shed", re.I)
+
+
+def download_san_francisco(session, user_agent: str, since: date, timeout: int = 120) -> list[dict]:
+    where = (f"permit_creation_date >= '{since.isoformat()}T00:00:00' AND existing_use IS NOT NULL AND "
+             "upper(existing_use) not like '%FAMILY%' AND upper(existing_use) not like '%APARTMENT%' AND "
+             "upper(coalesce(proposed_use,'')) not like '%FAMILY%' AND "
+             "upper(coalesce(proposed_use,'')) not like '%APARTMENT%'")
+    params = {"$where": where, "$limit": "20000",
+              "$select": "permit_number,permit_creation_date,status,description,estimated_cost,revised_cost,"
+                         "existing_use,proposed_use,street_number,street_name,street_suffix"}
+    r = session.get(SF_PERMITS, params=params, headers={"User-Agent": user_agent}, timeout=timeout)
+    r.raise_for_status()
+    return r.json()
+
+
+def san_francisco_records(rows: list[dict], since: date, include_minor: bool):
+    for rec in rows:
+        status = (rec.get("status") or "").strip()
+        before, after = (rec.get("existing_use") or "").strip(), (rec.get("proposed_use") or "").strip()
+        if status in CLOSED_OUT or SF_SKIP_USES.search(f"{before} {after}"):
+            continue
+        try:
+            opened = date.fromisoformat((rec.get("permit_creation_date") or "")[:10])
+        except ValueError:
+            continue
+        if opened < since:
+            continue
+        desc = " ".join((rec.get("description") or "").split())
+        if after and before and after != before:
+            signal, base = "Move-in (change of use)", 90
+        else:
+            hit = classify(f"COM: {desc}")  # uses are already commercial
+            if not hit or (hit[0] == "Other commercial" and not include_minor):
+                continue
+            if MINOR.search(desc) and hit[0] in ("Remodel", "Other commercial") and not include_minor:
+                continue
+            signal, base = hit
+        use = after or before
+        addr = " ".join(x for x in (rec.get("street_number"), rec.get("street_name"), rec.get("street_suffix")) if x)
+        yield {
+            "permit": (rec.get("permit_number") or "").strip(), "opened": opened, "signal": signal, "base": base,
+            "business": _clean_tenant(tenant_of(desc)) if QUOTED.search(desc) else "",
+            "address": addr.title(), "city": "San Francisco",
+            "value": money(rec.get("revised_cost") or rec.get("estimated_cost") or ""), "status": status.title(),
+            "description": f"{desc[:1].upper()}{desc[1:]} (use: {before}{' → ' + after if after and after != before else ''})",
+            "contractor": "",
+        }
+
+
+def parse_san_francisco(rows: list[dict], today: date | None = None, days: int = 90,
+                        include_minor: bool = False) -> list[dict]:
+    today = today or date.today()
+    return _finish(san_francisco_records(rows, today - timedelta(days=days), include_minor), today)
