@@ -7,6 +7,7 @@ Pipeline stages and notes can sync to Supabase when configured; CSV import/expor
 """
 from __future__ import annotations
 
+import hashlib
 import io
 import re
 import secrets
@@ -44,6 +45,12 @@ from connection_requests import (
     duplicate_open_connection,
     normalize_connection_status,
 )
+try:  # new module; guarded so a stale deploy degrades to a notice instead of crashing
+    import trigger_leads
+    TRIGGER_LEADS_IMPORT_ERROR = ""
+except Exception as exc:
+    trigger_leads = None
+    TRIGGER_LEADS_IMPORT_ERROR = str(exc)
 try:
     from deployment_status import (
         APP_VERSION,
@@ -5932,7 +5939,244 @@ if go:
 # --------------------------------------------------------------------------- #
 # Tabs
 # --------------------------------------------------------------------------- #
-tab_discover, tab_pipeline = st.tabs(["🧭 Discover", f"📋 My Pipeline ({len(pipe())})"])
+# --------------------------------------------------------------------------- #
+# Trigger leads (new / changing-hands businesses from the CA liquor board file)
+# --------------------------------------------------------------------------- #
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def load_trigger_leads(cities: tuple[str, ...], issued_days: int) -> list[dict]:
+    csv_text = trigger_leads.download_abc_csv(requests, USER_AGENT)
+    return trigger_leads.parse_abc(csv_text, list(cities), issued_days=issued_days)
+
+
+@st.cache_data(ttl=24 * 3600, show_spinner=False)
+def trigger_contact_listings(cities: tuple[str, ...]) -> list[dict]:
+    boxes = [geocode_area(f"{c}, California") for c in cities]
+    bbox = trigger_leads.union_bbox(boxes)
+    if bbox is None:
+        return []
+    s, w, n, e = bbox
+    if (n - s) * (e - w) > 0.6:  # roughly a 50 x 50 mile box; bigger areas time out on Overpass
+        raise RuntimeError("That territory is too big to look up contacts in one go — pick fewer cities.")
+    return trigger_leads.fetch_listings(requests, trigger_leads.osm_contact_query(bbox), USER_AGENT)
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def load_trigger_news(cities: tuple[str, ...], days: int) -> list[dict]:
+    return trigger_leads.fetch_news(requests, list(cities), USER_AGENT, days)
+
+
+@st.cache_data(ttl=12 * 3600, show_spinner=False)
+def load_new_on_map(cities: tuple[str, ...], days: int) -> list[dict]:
+    bbox = trigger_leads.union_bbox([geocode_area(f"{c}, California") for c in cities])
+    if bbox is None:
+        return []
+    s, w, n, e = bbox
+    if (n - s) * (e - w) > 0.6:
+        raise RuntimeError("That territory is too big for one map search — pick fewer cities.")
+    since = date.today() - timedelta(days=days)
+    elements = trigger_leads.fetch_listings(requests, trigger_leads.osm_new_query(bbox, since), USER_AGENT,
+                                           mirrors=trigger_leads.NEW_ON_MAP_MIRRORS)
+    return trigger_leads.parse_new_on_map(elements, hide_chains=False)
+
+
+def _add_rows_to_pipeline(picked: list[str], labels: dict, make_entry) -> None:
+    for label in picked:
+        bid, name, cat, note = make_entry(labels[label])
+        set_stage(bid, "New lead", name, cat)
+        set_note(bid, note, name, cat)
+
+
+def render_trigger_news(cities: list[str]):
+    st.caption("Local news from the last few weeks about businesses opening, signing leases or moving — "
+               "the best signal for offices and new storefronts. Click the headline to read the story.")
+    days = st.select_slider("Look back", [7, 14, 30, 60], value=30, format_func=lambda d: f"{d} days",
+                            key="tn_days")
+    if st.button("Find news leads", type="primary", disabled=not cities, key="tn_go"):
+        with st.spinner("Searching local news…"):
+            st.session_state["tn_rows"] = [dict(x) for x in load_trigger_news(tuple(cities), days)]
+    rows = st.session_state.get("tn_rows")
+    if rows is None:
+        st.info("Click **Find news leads**.")
+        return
+    if not rows:
+        st.info("No opening, lease or move stories found for these cities. Try a longer look-back.")
+        return
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Stories", len(rows))
+    m2.metric("Openings", sum(1 for r in rows if r["Signal"] == "Opening"))
+    m3.metric("Leases & moves", sum(1 for r in rows if r["Signal"] != "Opening"))
+    cols = ["Score", "Date", "Signal", "City", "Headline", "Source", "Link"]
+    df = pd.DataFrame(rows)[cols]
+    st.dataframe(df, use_container_width=True, hide_index=True, column_config={
+        "Score": st.column_config.ProgressColumn("Score", min_value=0, max_value=100, format="%d"),
+        "Link": st.column_config.LinkColumn("Story", display_text="Read"),
+    })
+    if st.session_state.get("tn_added_msg"):
+        st.success(st.session_state.pop("tn_added_msg"))
+    labels = {f"{r['Headline']} ({r['City']})": r for r in rows}
+    picked = st.multiselect("Add to My Pipeline", list(labels), key="tn_pick")
+    a1, a2 = st.columns(2)
+    if a1.button("Add selected to pipeline", disabled=not picked, key="tn_add"):
+        _add_rows_to_pipeline(picked, labels, lambda r: (
+            "news-" + hashlib.sha1(r["Link"].encode()).hexdigest()[:12], r["Headline"][:80], r["Signal"],
+            f"{r['Signal']} · {r['City']} · {r['Date']} · {r['Link']}"))
+        st.session_state["tn_added_msg"] = f"Added {len(picked)} to My Pipeline."
+        st.session_state.pop("tn_pick", None)
+        st.rerun()
+    a2.download_button("⬇️ Download CSV", df.to_csv(index=False).encode(), file_name="news_leads.csv",
+                       mime="text/csv", key="tn_csv")
+
+
+def render_new_on_map(cities: list[str], hide_chains: bool):
+    st.caption("Businesses added to the public map (OpenStreetMap) recently — salons, offices, clinics, gyms, "
+               "shops and restaurants, not just places with a liquor license. Volunteers add listings, so some "
+               "appear weeks after opening and a few are older places mapped for the first time.")
+    days = st.select_slider("Added in the last", [30, 60, 90, 180], value=60, format_func=lambda d: f"{d} days",
+                            key="tm_days")
+    if st.button("Find new businesses", type="primary", disabled=not cities, key="tm_go"):
+        with st.spinner("Searching the map for newly added businesses (up to a minute)…"):
+            try:
+                st.session_state["tm_rows"] = [dict(x) for x in load_new_on_map(tuple(cities), days)]
+            except Exception as exc:
+                st.error(f"Map search unavailable right now: {exc}")
+                return
+    rows = st.session_state.get("tm_rows")
+    if rows is None:
+        st.info("Click **Find new businesses**.")
+        return
+    rows = [r for r in rows if not (hide_chains and r["Note"] == "Chain")]
+    if not rows:
+        st.info("Nothing new on the map for these cities. Try a longer window.")
+        return
+    m1, m2, m3 = st.columns(3)
+    m1.metric("New businesses", len(rows))
+    m2.metric("Offices & clinics", sum(1 for r in rows if "(office)" in r["Kind"] or r["Kind"] in
+                                       ("doctor", "dentist", "clinic", "veterinary")))
+    m3.metric("With phone or email", sum(1 for r in rows if r["Phone"] or r["Email"]))
+    cols = ["Score", "Added", "Business", "Kind", "Address", "City", "Phone", "Email", "Website", "Note", "Map"]
+    df = pd.DataFrame(rows)[cols]
+    st.dataframe(df, use_container_width=True, hide_index=True, column_config={
+        "Score": st.column_config.ProgressColumn("Score", min_value=0, max_value=100, format="%d"),
+        "Website": st.column_config.LinkColumn("Website"),
+        "Map": st.column_config.LinkColumn("Map", display_text="View"),
+    })
+    if st.session_state.get("tm_added_msg"):
+        st.success(st.session_state.pop("tm_added_msg"))
+    labels = {f"{r['Business']} — {r['Address'] or r['Kind']}": r for r in rows[:200]}
+    picked = st.multiselect("Add to My Pipeline", list(labels), key="tm_pick")
+    a1, a2 = st.columns(2)
+    if a1.button("Add selected to pipeline", disabled=not picked, key="tm_add"):
+        _add_rows_to_pipeline(picked, labels, lambda r: (
+            f"osm-{r['OSM id']}", r["Business"], r["Kind"],
+            " · ".join(x for x in (f"New on map {r['Added']}", r["Address"], r["Phone"], r["Email"]) if x)))
+        st.session_state["tm_added_msg"] = f"Added {len(picked)} to My Pipeline."
+        st.session_state.pop("tm_pick", None)
+        st.rerun()
+    a2.download_button("⬇️ Download CSV", df.to_csv(index=False).encode(), file_name="new_on_map.csv",
+                       mime="text/csv", key="tm_csv")
+
+
+def render_trigger_leads():
+    st.subheader("🚨 Trigger Leads — businesses opening, moving or changing hands")
+    if trigger_leads is None:
+        st.warning(f"Trigger leads are temporarily unavailable ({TRIGGER_LEADS_IMPORT_ERROR}). Reload in a minute.")
+        return
+    presets = list(trigger_leads.PRESET_TERRITORIES) + ["Custom cities…"]
+    c1, c2 = st.columns([2, 1])
+    preset = c1.selectbox("Territory", presets, key="tl_preset")
+    if preset == "Custom cities…":
+        raw = c1.text_input("California cities (comma-separated)", key="tl_custom", placeholder="Fresno, Clovis")
+        cities = [c.strip() for c in raw.split(",") if c.strip()]
+    else:
+        cities = trigger_leads.PRESET_TERRITORIES[preset]
+        c1.caption(", ".join(cities))
+    hide_chains = c2.checkbox("Hide chains / national accounts", value=True, key="tl_hide_chains")
+    source = st.radio("Source", ["🍷 Liquor licenses", "📰 News: openings, leases & moves", "🗺️ New on the map"],
+                      horizontal=True, key="tl_source", label_visibility="collapsed")
+    if source.startswith("📰"):
+        render_trigger_news(cities)
+        return
+    if source.startswith("🗺️"):
+        render_new_on_map(cities, hide_chains)
+        return
+    st.caption(
+        "Pending liquor-license applications and new licenses from the California ABC daily file. "
+        "A pending license means a restaurant, bar, store or hotel is building out or getting a new owner — "
+        "the moment they buy security, POS, signage and services. California only; refreshed daily."
+    )
+    issued_days = st.slider("Also include licenses issued in the last … days", 30, 365, 180, 15, key="tl_days")
+
+    if st.button("Find trigger leads", type="primary", disabled=not cities, key="tl_go"):
+        with st.spinner("Downloading today's California ABC license file…"):
+            try:
+                st.session_state["tl_leads"] = [dict(x) for x in load_trigger_leads(tuple(cities), issued_days)]
+                st.session_state["tl_cities"] = tuple(cities)
+            except Exception as exc:
+                st.error(f"Couldn't load the ABC file right now: {exc}")
+                return
+
+    leads = st.session_state.get("tl_leads")
+    if not leads:
+        st.info("Pick a territory and click **Find trigger leads**.")
+        return
+    rows = [x for x in leads if not (hide_chains and x.get("Chain"))]
+    have_contacts = "Phone" in rows[0] if rows else False
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Leads", len(rows))
+    m2.metric("Pending (opening / new owner)", sum(1 for x in rows if x["Trigger"].startswith("Pending")))
+    m3.metric("With phone or email", sum(1 for x in rows if x.get("Phone") or x.get("Email")) if have_contacts else "—")
+
+    if not have_contacts and st.button("📞 Look up phone & email", key="tl_contacts"):
+        with st.spinner("Matching public listings and reading business websites (can take 1–2 minutes)…"):
+            try:
+                listings = trigger_contact_listings(st.session_state.get("tl_cities", tuple(cities)))
+                trigger_leads.enrich_contacts(leads, listings, session=requests, user_agent=USER_AGENT)
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Contact lookup unavailable right now: {exc}")
+
+    cols = ["Score", "Business", "Person to ask for", "Phone", "Email", "Website", "City", "Address", "Type",
+            "Trigger", "Pitch", "Owner", "Owner mailing address", "ABC record"]
+    df = pd.DataFrame(rows)
+    for c in cols:
+        if c not in df:
+            df[c] = ""
+    st.dataframe(
+        df[cols], use_container_width=True, hide_index=True,
+        column_config={
+            "Score": st.column_config.ProgressColumn("Score", min_value=0, max_value=100, format="%d"),
+            "Website": st.column_config.LinkColumn("Website"),
+            "ABC record": st.column_config.LinkColumn("Owners / officers", display_text="ABC record"),
+        },
+    )
+    st.caption("Click **ABC record** to see the owners and managing members on the license. "
+               "Businesses not open yet rarely have a phone listed — stop by while they're building out.")
+
+    if st.session_state.get("tl_added_msg"):
+        st.success(st.session_state.pop("tl_added_msg"))
+    labels = {f"{x['Business']} — {x['Address']}, {x['City']}": x for x in rows[:200]}
+    picked = st.multiselect("Add to My Pipeline", list(labels), key="tl_pick")
+    a1, a2 = st.columns([1, 1])
+    if a1.button("Add selected to pipeline", disabled=not picked, key="tl_add"):
+        for label in picked:
+            x = labels[label]
+            bid = f"abc-{x['ABC file #']}"
+            set_stage(bid, "New lead", x["Business"], x["Type"])
+            details = [x["Trigger"], f"{x['Address']}, {x['City']}", x.get("Phone", ""), x.get("Email", ""),
+                       f"Owner: {x['Person to ask for'] or x['Owner']}"]
+            set_note(bid, " · ".join(d for d in details if d), x["Business"], x["Type"])
+        st.session_state["tl_added_msg"] = f"Added {len(picked)} to My Pipeline."
+        st.session_state.pop("tl_pick", None)
+        st.rerun()  # redraw so the My Pipeline tab count updates
+    a2.download_button("⬇️ Download CSV", df[cols].to_csv(index=False).encode(),
+                       file_name="trigger_leads.csv", mime="text/csv", key="tl_csv")
+
+
+tab_discover, tab_triggers, tab_pipeline = st.tabs(
+    ["🧭 Discover", "🚨 Trigger Leads", f"📋 My Pipeline ({len(pipe())})"])
+
+with tab_triggers:
+    render_trigger_leads()
 
 
 def prospect_card(r: pd.Series):
