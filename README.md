@@ -1,4 +1,6 @@
-# Territory Prospector
+# FirstKnock
+
+*by HS Finest* · live at https://firstknock.hsfinest.com (formerly Territory Prospector)
 
 A multi-sided sales marketplace and prospecting platform, built in Streamlit.
 

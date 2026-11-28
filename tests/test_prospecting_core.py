@@ -36,13 +36,13 @@ class ProspectingCoreTests(unittest.TestCase):
         self.assertIn("No website +35", why)
 
     def test_security_profile_does_not_overweight_website_gap(self):
-        score, why = lead_score(self.restaurant, "Security/ADT")
+        score, why = lead_score(self.restaurant, "Security systems")
         self.assertEqual(score, 100)
         self.assertIn("No website +5", why)
-        self.assertIn("Good category fit for Security/ADT +10", why)
+        self.assertIn("Good category fit for Security systems +10", why)
 
     def test_sales_insight_is_product_specific(self):
-        insight = sales_insight(self.restaurant, "Security/ADT")
+        insight = sales_insight(self.restaurant, "Security systems")
         self.assertIn("Recommended approach:", insight)
         self.assertIn("security/CCTV", insight)
 

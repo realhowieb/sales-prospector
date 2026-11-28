@@ -6,8 +6,13 @@ from auth_system import (
     can_create_rep,
     is_admin_role,
     normalize_account_role,
+    password_problem,
     public_signup_role,
+    recovery_pkce_pair,
+    recovery_request_path,
 )
+import base64
+import hashlib
 
 
 class AuthSystemTest(unittest.TestCase):
@@ -41,6 +46,28 @@ class AuthSystemTest(unittest.TestCase):
         self.assertEqual(session.user_id, "user-1")
         self.assertEqual(session.email, "rep@example.com")
         self.assertEqual(session.access_token, "token")
+
+
+class PasswordResetTests(unittest.TestCase):
+    def test_pkce_pair_is_stable_valid_and_secret_bound(self):
+        v1, c1 = recovery_pkce_pair(" Rep@Example.com ", "server-secret")
+        v2, _ = recovery_pkce_pair("rep@example.com", "server-secret")
+        self.assertEqual(v1, v2)  # same email (normalized) rebuilds the verifier in a new tab
+        self.assertTrue(43 <= len(v1) <= 128)
+        expected = base64.urlsafe_b64encode(hashlib.sha256(v1.encode()).digest()).decode().rstrip("=")
+        self.assertEqual(c1, expected)  # S256 challenge
+        self.assertNotEqual(v1, recovery_pkce_pair("rep@example.com", "other-secret")[0])
+        self.assertNotEqual(v1, recovery_pkce_pair("other@example.com", "server-secret")[0])
+
+    def test_recovery_path_redirects_to_reset_page(self):
+        self.assertEqual(recovery_request_path(""), "recover")
+        self.assertEqual(recovery_request_path("https://firstknock.hsfinest.com/"),
+                         "recover?redirect_to=https%3A%2F%2Ffirstknock.hsfinest.com%2F%3Freset_password%3D1")
+
+    def test_password_problem(self):
+        self.assertIn("8", password_problem("short", "short"))
+        self.assertIn("match", password_problem("longenough1", "longenough2"))
+        self.assertEqual(password_problem("longenough1", "longenough1"), "")
 
 
 if __name__ == "__main__":
