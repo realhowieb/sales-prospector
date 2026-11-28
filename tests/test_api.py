@@ -8,12 +8,12 @@ try:
     from api import cache
     from api.auth import User, current_user, get_settings
     from api.settings import Settings
+
+    SETTINGS = Settings("https://sb.example", "anon", "service", ("http://localhost:3000",))
 except ImportError:  # API deps are optional for the Streamlit app's CI
     main = None
 
 from tests.test_trigger_leads import CSV
-
-SETTINGS = Settings("https://sb.example", "anon", "service", ("http://localhost:3000",))
 
 
 @unittest.skipIf(main is None, "fastapi not installed")
