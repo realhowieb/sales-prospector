@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
@@ -21,6 +22,14 @@ export default function Login() {
   useEffect(() => {
     if (session) router.replace("/");
   }, [session, router]);
+
+  // Links from the landing pages: /login/?signup=1&trade=solar
+  useEffect(() => {
+    const q = new URLSearchParams(location.search);
+    if (q.has("signup")) setMode("signup");
+    const t = q.get("trade");
+    if (t && TRADES.some((x) => x.id === t)) setTrade(t);
+  }, []);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -50,7 +59,9 @@ export default function Login() {
   return (
     <div className="auth">
       <h1>🚪 FirstKnock</h1>
-      <p className="muted" style={{ textAlign: "center", marginTop: 0 }}>Be the first to knock on new businesses.</p>
+      <p className="muted" style={{ textAlign: "center", marginTop: 0 }}>
+        Be the first to knock on new businesses. <Link href="/welcome/">How it works</Link>
+      </p>
       <form className="panel" onSubmit={submit}>
         <div className="switch">
           {(["signin", "signup", "reset"] as Mode[]).map((m) => (
