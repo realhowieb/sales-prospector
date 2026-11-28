@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 from dataclasses import dataclass
+from urllib.parse import quote
 
 
 ACCOUNT_ROLES = {"rep", "company", "admin"}
@@ -54,3 +58,39 @@ def can_create_company(role: str | None) -> bool:
 
 def is_admin_role(role: str | None, admin_verified: bool = False) -> bool:
     return admin_verified and normalize_account_role(role) == "admin"
+
+
+# --------------------------------------------------------------------------- #
+# Password reset (Supabase PKCE recovery link, or a 6-digit code)
+# --------------------------------------------------------------------------- #
+MIN_PASSWORD_LENGTH = 8
+
+
+def recovery_pkce_pair(email: str, server_secret: str) -> tuple[str, str]:
+    """Deterministic PKCE verifier/challenge for a reset request.
+
+    The verifier is derived from the email and a server-only secret, so the tab that opens
+    from the email link can rebuild it without any stored state. The one-time `code` in the
+    link is useless without it.
+    """
+    msg = (email or "").strip().lower().encode()
+    digest = hmac.new((server_secret or "").encode(), b"pw-reset:" + msg, hashlib.sha256).digest()
+    verifier = base64.urlsafe_b64encode(digest + hashlib.sha256(digest).digest()).decode().rstrip("=")
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
+    return verifier, challenge
+
+
+def recovery_request_path(base_url: str) -> str:
+    """Supabase /recover path, sending the link back to this app's reset page."""
+    if not base_url:
+        return "recover"
+    return "recover?redirect_to=" + quote(f"{base_url.rstrip('/')}/?reset_password=1", safe="")
+
+
+def password_problem(password: str, confirm: str) -> str:
+    """Return a user-facing problem with a new password, or '' if it is acceptable."""
+    if len(password or "") < MIN_PASSWORD_LENGTH:
+        return f"Use at least {MIN_PASSWORD_LENGTH} characters."
+    if password != confirm:
+        return "The two passwords don't match."
+    return ""

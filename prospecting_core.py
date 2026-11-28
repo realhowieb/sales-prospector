@@ -14,7 +14,7 @@ PRODUCT_PROFILES: dict[str, dict] = {
         "fit_categories": "all",
         "angle": "presence gap and direct-response conversation",
     },
-    "Security/ADT": {
+    "Security systems": {
         "weights": {"phone": 30, "no_website": 5, "address": 30, "independent": 25},
         "fit_categories": {"Restaurant & Café", "Retail Boutique", "Beauty & Spa", "Auto Services", "Fitness & Gym"},
         "fit_bonus": 10,

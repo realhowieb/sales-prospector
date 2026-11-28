@@ -127,19 +127,19 @@ class RepMatchScoreTests(unittest.TestCase):
         self.assertEqual(match_confidence_label(90, enough_context=False), "Possible Match")
 
     def test_direct_competitor_overlap_is_likely_conflict_but_private_by_default(self):
-        rep = {"existing_lines": ["ADT Security"], "categories": ["Security"]}
-        opportunity = {"direct_competitors": ["ADT"], "categories": ["Security"]}
+        rep = {"existing_lines": ["Acme Security"], "categories": ["Security"]}
+        opportunity = {"direct_competitors": ["Acme Security"], "categories": ["Security"]}
         conflict = detect_product_line_conflict(rep, opportunity)
         self.assertEqual(conflict.status, "Likely conflict")
         self.assertIn("direct competitor", conflict.explanation)
         self.assertEqual(conflict.public_details, [])
 
     def test_company_can_mark_competitor_details_public(self):
-        rep = {"existing_lines": ["ADT"], "categories": ["Security"]}
-        opportunity = {"direct_competitors": ["ADT"], "competitor_info_public": True}
+        rep = {"existing_lines": ["Acme Security"], "categories": ["Security"]}
+        opportunity = {"direct_competitors": ["Acme Security"], "competitor_info_public": True}
         conflict = detect_product_line_conflict(rep, opportunity)
         self.assertEqual(conflict.status, "Likely conflict")
-        self.assertEqual(conflict.public_details, ["ADT"])
+        self.assertEqual(conflict.public_details, ["Acme Security"])
 
     def test_related_category_overlap_is_only_possible_conflict(self):
         rep = {"existing_lines": ["Alarm monitoring package"], "categories": ["Security"]}
@@ -154,13 +154,13 @@ class RepMatchScoreTests(unittest.TestCase):
 
     def test_likely_conflict_flows_into_opportunity_match(self):
         rep = {
-            "existing_lines": ["ADT"],
+            "existing_lines": ["Acme Security"],
             "categories": ["Security"],
             "states": ["CA"],
             "availability_status": "open",
         }
         opportunity = {
-            "direct_competitors": ["ADT"],
+            "direct_competitors": ["Acme Security"],
             "categories": ["Security"],
             "states": ["CA"],
         }

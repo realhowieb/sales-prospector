@@ -1,5 +1,5 @@
 """
-Territory Prospector — find new business customers by area & category.
+FirstKnock (by HS Finest) — find new business customers by area & category.
 
 Live data source: OpenStreetMap via the public Overpass API (no API key, no billing).
 Lead scores are computed from real listing signals and the rep's selected product profile.
@@ -27,7 +27,10 @@ from auth_system import (
     can_create_rep,
     is_admin_role,
     normalize_account_role,
+    password_problem,
     public_signup_role,
+    recovery_pkce_pair,
+    recovery_request_path,
 )
 from monetization import (
     can_be_featured,
@@ -274,7 +277,7 @@ except Exception:  # pragma: no cover
 # --------------------------------------------------------------------------- #
 # Reference data
 # --------------------------------------------------------------------------- #
-APP_TITLE = "Territory Prospector"
+APP_TITLE = "FirstKnock"
 
 # Preset metro bounding boxes: (south, west, north, east)
 METROS: dict[str, tuple[float, float, float, float]] = {
@@ -2624,13 +2627,18 @@ def render_auth_panel():
                     st.error("Enter your email.")
                 else:
                     try:
-                        auth_rest_request("recover", {"email": normalize_owner_email(reset_email)})
-                        st.success("If that email has an account, Supabase will send a reset link.")
+                        email = normalize_owner_email(reset_email)
+                        _, challenge = recovery_pkce_pair(email, _reset_secret())
+                        auth_rest_request(recovery_request_path(_app_base_url()), {
+                            "email": email, "code_challenge": challenge, "code_challenge_method": "s256"})
+                        st.success("If that email has an account, Supabase will send a reset link. "
+                                   "Open it and choose a new password.")
                     except Exception as exc:
                         st.error(f"Reset request failed: {exc}")
+            st.markdown("[Have a reset code? Set a new password →](./?reset_password=1)")
 
 
-st.set_page_config(page_title=APP_TITLE, page_icon="📍", layout="wide")
+st.set_page_config(page_title=APP_TITLE, page_icon="🚪", layout="wide")
 
 review_token_from_url = st.query_params.get("review_token", "")
 
@@ -2762,6 +2770,72 @@ if review_token_from_url:
     st.stop()
 
 
+def _reset_secret() -> str:
+    return SUPABASE_SERVICE_KEY or SUPABASE_KEY or ""
+
+
+def set_new_password(data: dict, password: str) -> None:
+    """Use a recovery session to change the password, then sign the user in."""
+    session = auth_session_from_response(data)
+    r = requests.put(
+        f"{SUPABASE_URL}/auth/v1/user",
+        headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {session.access_token}",
+                 "Content-Type": "application/json"},
+        json={"password": password},
+        timeout=20,
+    )
+    _sb_check(r)
+    activate_auth_session(data)
+
+
+def render_password_reset_page():
+    st.title("🔑 Set a new password")
+    if not SUPABASE_ON:
+        st.warning("Accounts aren't enabled on this deployment.")
+        return
+    link_error = st.query_params.get("error_description", "")
+    if link_error:
+        st.error(f"That reset link didn't work ({link_error}). Request a new one from the sidebar → Reset.")
+    code = st.query_params.get("code", "")
+    st.caption("Enter the email on your account and a new password." if code else
+               "Enter your email, the code from your reset email, and a new password.")
+    with st.form("pw_reset_form"):
+        email = st.text_input("Email")
+        token = "" if code else st.text_input("Code from the reset email")
+        password = st.text_input("New password", type="password")
+        confirm = st.text_input("Confirm new password", type="password")
+        submitted = st.form_submit_button("Set new password", type="primary")
+    if submitted:
+        problem = ("Enter your email." if not email.strip() else
+                   "Enter the code from the email." if not code and not token.strip() else
+                   password_problem(password, confirm))
+        if problem:
+            st.error(problem)
+        else:
+            try:
+                if code:
+                    verifier, _ = recovery_pkce_pair(normalize_owner_email(email), _reset_secret())
+                    data = auth_rest_request("token?grant_type=pkce", {"auth_code": code, "code_verifier": verifier})
+                else:
+                    data = auth_rest_request("verify", {"type": "recovery", "email": normalize_owner_email(email),
+                                                        "token": token.strip()})
+                set_new_password(data, password)
+                st.session_state["pw_reset_done"] = True
+                st.query_params.clear()
+                st.rerun()
+            except Exception as exc:
+                st.error("Couldn't set the password. The link or code may have expired or already been used, "
+                         f"or the email doesn't match the account. Request a new reset. ({exc})")
+    st.markdown("[← Back to FirstKnock](./)")
+
+
+if st.query_params.get("reset_password"):
+    render_password_reset_page()
+    st.stop()
+if st.session_state.pop("pw_reset_done", False):
+    st.success("Password updated — you're signed in.")
+
+
 def render_filter_pills(labels: list[str], empty_text: str = ""):
     if not labels:
         if empty_text:
@@ -2855,10 +2929,10 @@ elif public_seo_mode:
     admin_dashboard_mode = False
 
 if home_mode:
-    st.title("Territory Prospector")
+    st.title("🚪 FirstKnock")
     st.caption("Find the right sales rep for any territory.")
 elif rep_mode:
-    st.title("📍 Territory Prospector")
+    st.title("🚪 FirstKnock")
     st.caption("Find new business customers by area & category — live data from OpenStreetMap, no API key required.")
 elif company_directory_mode:
     st.title("🏢 Company Directory")
@@ -2879,7 +2953,7 @@ elif admin_dashboard_mode:
     st.title("🛡️ Admin Dashboard")
     st.caption("Review, moderate, and manage marketplace activity.")
 elif public_seo_mode:
-    st.title("Territory Prospector")
+    st.title("FirstKnock")
     st.caption("Public marketplace page backed by active listings.")
 else:
     st.title("🛍️ Find a Rep · Best Deals")
@@ -4131,7 +4205,7 @@ def render_homepage():
 
     st.markdown(
         '<div class="home-hero">'
-        '<div class="home-kicker">Territory Prospector</div>'
+        '<div class="home-kicker">FirstKnock · by HS Finest</div>'
         '<div class="home-title">Find the right sales rep for any territory.</div>'
         '<div class="home-subtitle">Search representative profiles, product-line opportunities, and marketplace territory signals from one focused workspace.</div>'
         '</div>',
