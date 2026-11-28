@@ -4,6 +4,20 @@
 
 A multi-sided sales marketplace and prospecting platform, built in Streamlit.
 
+## FirstKnock API + website (rep lead finder)
+
+The rep side also runs as a separate API and website on Render:
+
+| Part | Folder | Render | Address |
+|---|---|---|---|
+| API (FastAPI) | `api/` | web service · build `pip install -r api/requirements.txt` · start `uvicorn api.main:app --host 0.0.0.0 --port $PORT` | api.firstknock.hsfinest.com |
+| Website (Next.js, static export) | `web/` | static site · root `web` · build `npm ci && npm run build` · publish `out` | firstknock.hsfinest.com |
+
+API env vars: `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_KEY`, `WEB_ORIGINS`.
+Website env vars: `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `NEXT_PUBLIC_API_URL` (see `web/.env.example`).
+Sign-in is Supabase Auth; every `/v1` API route needs the user's access token. Docs at `/docs` on the API.
+Lead logic is shared with the Streamlit app: `trigger_leads.py`, `discover_core.py`, `prospecting_core.py`.
+
 Three audiences share one workspace, chosen from the sidebar:
 
 - **🧭 Sales rep — find customers:** discover new business customers by area + category from
