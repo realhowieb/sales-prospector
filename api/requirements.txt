@@ -1,0 +1,7 @@
+# FirstKnock API (Render web service, root = repository root).
+#   Build:  pip install -r api/requirements.txt
+#   Start:  uvicorn api.main:app --host 0.0.0.0 --port $PORT
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+requests>=2.31
+httpx==0.28.1  # TestClient

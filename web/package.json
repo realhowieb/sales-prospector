@@ -1,0 +1,26 @@
+{
+  "name": "firstknock-web",
+  "version": "1.0.0",
+  "private": true,
+  "description": "FirstKnock website (static Next.js export) over the FirstKnock API.",
+  "engines": { "node": ">=20.9.0" },
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "npx serve out",
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "2.49.4",
+    "next": "15.3.1",
+    "react": "19.1.0",
+    "react-dom": "19.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.3",
+    "@types/react": "19.1.2",
+    "@types/react-dom": "19.1.2",
+    "typescript": "5.8.3"
+  }
+}
