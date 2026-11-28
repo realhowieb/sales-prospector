@@ -82,5 +82,65 @@ class ContactTests(unittest.TestCase):
         self.assertIsNone(tl.union_bbox([None]))
 
 
+RSS = """<?xml version="1.0"?><rss><channel>
+<item><title>Bartow Ace opens third location in Mountain View - Mountain View Voice</title>
+  <link>https://news.example/a</link><pubDate>Wed, 11 Nov 2026 08:00:00 GMT</pubDate>
+  <source url="https://mv-voice.com">Mountain View Voice</source></item>
+<item><title>Acme signs lease for 40,000 square feet in Mountain View - Bizjournal</title>
+  <link>https://news.example/b</link><pubDate>Mon, 23 Nov 2026 08:00:00 GMT</pubDate><source>Bizjournal</source></item>
+<item><title>Mountain View affordable homes open to residents - Paper</title>
+  <link>https://news.example/c</link><pubDate>Mon, 23 Nov 2026 08:00:00 GMT</pubDate><source>Paper</source></item>
+<item><title>Bakery opens downtown - Paper</title>
+  <link>https://news.example/d</link><pubDate>Mon, 23 Nov 2026 08:00:00 GMT</pubDate><source>Paper</source></item>
+<item><title>Old store opens in Mountain View - Paper</title>
+  <link>https://news.example/e</link><pubDate>Mon, 01 Jun 2026 08:00:00 GMT</pubDate><source>Paper</source></item>
+</channel></rss>"""
+
+
+class NewsTests(unittest.TestCase):
+    def test_parse_keeps_openings_and_leases_and_drops_noise(self):
+        rows = tl.parse_news_rss(RSS, "Mountain View", today=date(2026, 11, 27), days=30)
+        by_link = {r["Link"]: r for r in rows}
+        self.assertEqual(set(by_link), {"https://news.example/a", "https://news.example/b"})
+        self.assertEqual(by_link["https://news.example/a"]["Signal"], "Opening")
+        self.assertEqual(by_link["https://news.example/a"]["Headline"], "Bartow Ace opens third location in Mountain View")
+        self.assertEqual(by_link["https://news.example/b"]["Signal"], "New lease")
+        self.assertGreater(by_link["https://news.example/b"]["Score"], by_link["https://news.example/a"]["Score"])
+
+    def test_bad_xml_is_empty(self):
+        self.assertEqual(tl.parse_news_rss("<html>busy</html", "Palo Alto"), [])
+
+
+class NewOnMapTests(unittest.TestCase):
+    def test_keeps_recent_businesses_only(self):
+        els = [
+            {"type": "node", "id": 1, "version": 1, "timestamp": "2026-10-15T00:00:00Z",
+             "tags": {"name": "Tanya's Hair Design", "shop": "hairdresser", "addr:housenumber": "1030",
+                      "addr:street": "Castro Street"}},
+            {"type": "node", "id": 2, "version": 2, "timestamp": "2026-10-13T00:00:00Z",
+             "tags": {"name": "LegalZoom", "office": "company", "addr:housenumber": "954", "addr:street": "Villa St"}},
+            {"type": "node", "id": 3, "version": 7, "timestamp": "2026-10-13T00:00:00Z",
+             "tags": {"name": "Old Diner", "amenity": "restaurant"}},  # long-mapped, just edited
+            {"type": "node", "id": 4, "version": 1, "tags": {"name": "Caltrain BikeHub", "amenity": "bicycle_parking"}},
+            {"type": "node", "id": 5, "version": 1, "tags": {"name": "Panda Express", "amenity": "fast_food"}},
+            {"type": "node", "id": 6, "version": 1, "tags": {"name": "Global Risk Solutions", "office": "security"}},
+        ]
+        rows = tl.parse_new_on_map(els)
+        names = [r["Business"] for r in rows]
+        self.assertEqual(names[0], "LegalZoom")  # offices rank first
+        self.assertIn("Tanya's Hair Design", names)
+        self.assertNotIn("Old Diner", names)
+        self.assertNotIn("Caltrain BikeHub", names)
+        self.assertNotIn("Panda Express", names)
+        competitor = next(r for r in rows if r["Business"] == "Global Risk Solutions")
+        self.assertEqual(competitor["Note"], "Likely security competitor")
+        self.assertEqual(rows[-1]["Business"], "Global Risk Solutions")
+
+    def test_query_uses_newer_filter(self):
+        q = tl.osm_new_query((37.3, -122.2, 37.5, -122.0), date(2026, 10, 1))
+        self.assertIn('(newer:"2026-10-01T00:00:00Z")', q)
+        self.assertIn("out center meta", q)
+
+
 if __name__ == "__main__":
     unittest.main()

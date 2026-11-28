@@ -47,7 +47,10 @@ CHAINS = re.compile(
     r"safeway|hilton|marriott|residence inn|applebee|p ?f chang|grocery outlet|cardenas|whole foods|"
     r"trader joe|\bcvs\b|walgreens|7-eleven|seven eleven|\btarget\b|costco|chevron|\bshell\b|\barco\b|valero|"
     r"rite aid|bevmo|total wine|sprouts|lucky|nob hill|starbucks|chipotle|olive garden|cheesecake|hyatt|"
-    r"sheraton|westin|homewood|hampton|courtyard|holiday inn|cinemark|\bamc\b|in-n-out|shake shack|mcdonald",
+    r"sheraton|westin|homewood|hampton|courtyard|holiday inn|cinemark|\bamc\b|in-n-out|shake shack|mcdonald|panda express|subway|"
+    r"jamba|peet.?s|philz|blue bottle|boba guys|sweetgreen|cava\b|panera|five guys|ups store|fedex|verizon|t-mobile|"
+    r"at&t|bank of america|wells fargo|chase\b|citibank|el pollo loco|taco bell|burger king|wendy.?s|"
+    r"domino.?s|pizza hut|\bkfc\b|popeyes|dunkin|jersey mike|chick-fil-a",
     re.I,
 )
 ENTITY = re.compile(
@@ -224,10 +227,17 @@ CONTACT_MIRRORS = [
 ]
 
 
-def fetch_listings(session, query: str, user_agent: str) -> list[dict]:
-    """Run the contact query on public Overpass mirrors with short per-mirror waits."""
+NEW_ON_MAP_MIRRORS = [  # heavier query: longer waits, most reliable mirror first
+    ("https://maps.mail.ru/osm/tools/overpass/api/interpreter", 60),
+    ("https://overpass-api.de/api/interpreter", 60),
+    ("https://overpass.private.coffee/api/interpreter", 60),
+]
+
+
+def fetch_listings(session, query: str, user_agent: str, mirrors=None) -> list[dict]:
+    """Run an Overpass query on public mirrors, moving on quickly when one is busy."""
     errors = []
-    for url, wait in CONTACT_MIRRORS:
+    for url, wait in mirrors or CONTACT_MIRRORS:
         try:
             r = session.post(url, data={"data": query}, headers={"User-Agent": user_agent}, timeout=wait)
             if r.status_code == 200 and r.text.lstrip().startswith("{"):
@@ -353,3 +363,163 @@ def union_bbox(boxes: list[tuple[float, float, float, float]]) -> tuple[float, f
     if not boxes:
         return None
     return (min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes))
+
+
+# --------------------------------------------------------------------------- #
+# News: openings, leases and moves (Google News RSS search — public, no key)
+# --------------------------------------------------------------------------- #
+NEWS_RSS = "https://news.google.com/rss/search?q={}&hl=en-US&gl=US&ceid=US:en"
+NEWS_TERMS = ('"now open" OR "grand opening" OR "coming soon" OR "to open" OR "will open" OR "opens" OR '
+              '"new location" OR "first store" OR "signs lease" OR "leases" OR "leased" OR "relocating" OR '
+              '"relocates" OR "moves headquarters" OR "new headquarters" OR "new office" OR "expands"')
+NEWS_SIGNALS = [  # (signal, score, title pattern) — first match wins
+    ("Moving / HQ", 90, re.compile(r"\b(relocat\w*|moves?|moving|headquarters|hq)\b", re.I)),
+    ("New lease", 88, re.compile(r"\b(lease[sd]?|leasing|sublease|square[- ]feet|sq\.? ?ft|office space)\b", re.I)),
+    ("Opening", 82, re.compile(r"\b(open(s|ing|ed)?|coming soon|debuts?|launch(es)?|new location|first store|"
+                               r"expands?|expansion)\b", re.I)),
+]
+NEWS_NOISE = re.compile(
+    r"\b(apartments?|condos?|homes?|housing|affordable|mortgage|open house|obituar\w*|memorial|school board|"
+    r"election|lawsuit|layoffs?|closes|closing|shut(s|ting)? down|fire (station|rescue|department)|police|"
+    r"homestand|game|season|basketball|football|baseball|soccer|softball|volleyball|tournament|playoffs?|"
+    r"palo alto networks|stock|shares|earnings|"
+    r"san diego|erie|colorado|arkansas|missouri|hawaii|oklahoma|wyoming|pennsylvania|georgia|texas|arizona)\b",
+    re.I)
+
+
+def news_query(city: str, days: int) -> str:
+    return f'"{city}" ({NEWS_TERMS}) when:{days}d'
+
+
+def parse_news_rss(xml_text: str, city: str, today: date | None = None, days: int = 30) -> list[dict]:
+    """Turn one Google News RSS response into scored lead rows; drops noise and old items."""
+    import xml.etree.ElementTree as ET
+    from email.utils import parsedate_to_datetime
+
+    today = today or date.today()
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return []
+    rows = []
+    for item in root.iter("item"):
+        raw_title = (item.findtext("title") or "").strip()
+        source = (item.findtext("source") or "").strip()
+        title = raw_title[: -len(source) - 3] if source and raw_title.endswith(f" - {source}") else raw_title
+        if not title or NEWS_NOISE.search(title):
+            continue
+        try:
+            published = parsedate_to_datetime(item.findtext("pubDate") or "").date()
+        except (TypeError, ValueError):
+            continue
+        if (today - published).days > days:
+            continue
+        signal = next(((name, score) for name, score, rx in NEWS_SIGNALS if rx.search(title)), None)
+        if not signal:
+            continue
+        if city.lower() not in title.lower():  # body-only mentions are mostly unrelated stories
+            continue
+        rows.append({
+            "Score": min(100, signal[1] + 10 - min(20, (today - published).days // 3)),
+            "Date": published.isoformat(),
+            "Signal": signal[0],
+            "City": city,
+            "Headline": title,
+            "Source": source,
+            "Link": item.findtext("link") or "",
+        })
+    return rows
+
+
+def fetch_news(session, cities: list[str], user_agent: str, days: int = 30) -> list[dict]:
+    """Search the news for each city, merge, de-duplicate by headline, best first."""
+    def one(city):
+        try:
+            r = session.get(NEWS_RSS.format(urllib.parse.quote(news_query(city, days))),
+                            headers={"User-Agent": user_agent}, timeout=20)
+            return parse_news_rss(r.text, city, days=days) if r.status_code == 200 else []
+        except Exception:
+            return []
+
+    with ThreadPoolExecutor(6) as ex:
+        batches = list(ex.map(one, cities))
+    best: dict[str, dict] = {}
+    for row in (r for batch in batches for r in batch):
+        key = norm_name(row["Headline"])
+        if key not in best or row["Score"] > best[key]["Score"]:
+            best[key] = row
+    return sorted(best.values(), key=lambda r: (r["Score"], r["Date"]), reverse=True)
+
+
+# --------------------------------------------------------------------------- #
+# New on the map: businesses added to OpenStreetMap in the last N days
+# --------------------------------------------------------------------------- #
+NOT_A_BUSINESS = {
+    "parking", "parking_space", "parking_entrance", "bench", "bicycle_parking", "motorcycle_parking", "toilets",
+    "drinking_water", "waste_basket", "waste_disposal", "recycling", "shelter", "fountain", "post_box",
+    "vending_machine", "charging_station", "atm", "telephone", "grave_yard", "loading_dock", "bicycle_rental",
+    "car_sharing", "public_bookcase", "bbq", "clock", "bicycle_repair_station", "water_point", "letter_box",
+    "taxi", "bus_station", "ferry_terminal", "compressed_air", "kick-scooter_rental", "give_box", "lounger",
+    "dog_toilet", "hunting_stand", "smoking_area", "photo_booth", "parcel_locker", "device_charging_station",
+}
+SECURITY_COMPETITOR = re.compile(r"\b(security|alarm|surveillance|protection|guard)\b", re.I)
+
+
+def osm_new_query(bbox: tuple[float, float, float, float], since: date) -> str:
+    s, w, n, e = bbox
+    nw = f'(newer:"{since.isoformat()}T00:00:00Z")'
+    keys = ['["shop"]', '["office"]', '["amenity"]', '["healthcare"]', '["craft"]', '["leisure"="fitness_centre"]']
+    parts = "".join(f'nwr["name"]{k}{nw};' for k in keys)
+    return f"[out:json][timeout:90][bbox:{s},{w},{n},{e}];({parts});out center meta;"
+
+
+def _kind(tags: dict) -> str:
+    for key in ("shop", "office", "healthcare", "amenity", "craft", "leisure"):
+        if tags.get(key):
+            label = tags[key].replace("_", " ")
+            return f"{label} ({key})" if key in ("office", "craft") else label
+    return ""
+
+
+def parse_new_on_map(elements: list[dict], hide_chains: bool = True) -> list[dict]:
+    """Keep listings that were first added recently (version 1–2), drop non-businesses."""
+    rows = []
+    seen = set()
+    for el in elements:
+        t = el.get("tags", {})
+        name = t.get("name", "").strip()
+        if not name or el.get("version", 99) > 2 or t.get("amenity") in NOT_A_BUSINESS:
+            continue
+        if t.get("office") in ("government", "diplomatic") or t.get("amenity") in ("school", "place_of_worship"):
+            continue
+        chain = bool(CHAINS.search(name) or t.get("brand"))
+        if hide_chains and chain:
+            continue
+        address = " ".join(x for x in (t.get("addr:housenumber"), t.get("addr:street")) if x)
+        key = (norm_name(name), addr_key(address) if address else None)
+        if key in seen:
+            continue
+        seen.add(key)
+        competitor = bool(SECURITY_COMPETITOR.search(name)) or t.get("office") == "security"
+        office = bool(t.get("office") or t.get("healthcare"))
+        score = 70 + (12 if office else 0) + (8 if address else 0) + (5 if t.get("phone") or t.get("website") else 0)
+        lat = el.get("lat") or el.get("center", {}).get("lat")
+        lon = el.get("lon") or el.get("center", {}).get("lon")
+        rows.append({
+            "Score": 20 if competitor else min(100, score),
+            "Added": (el.get("timestamp") or "")[:10],
+            "Business": name,
+            "Kind": _kind(t),
+            "Address": address,
+            "City": t.get("addr:city", ""),
+            "Phone": t.get("phone") or t.get("contact:phone") or "",
+            "Email": t.get("email") or t.get("contact:email") or "",
+            "Website": t.get("website") or t.get("contact:website") or "",
+            "Note": "Likely security competitor" if competitor else ("Chain" if chain else ""),
+            "Map": f"https://www.openstreetmap.org/{el.get('type', 'node')}/{el.get('id')}" if el.get("id") else "",
+            "OSM id": f"{el.get('type', 'node')}/{el.get('id')}",
+            "lat": lat,
+            "lon": lon,
+        })
+    rows.sort(key=lambda r: (r["Score"], r["Added"]), reverse=True)
+    return rows
