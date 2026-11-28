@@ -3,6 +3,8 @@
 import { useEffect, useState } from "react";
 import LeadTable, { ExtLink, ScoreBar, type Column } from "@/components/LeadTable";
 import { api, type Options } from "@/lib/api";
+import Link from "next/link";
+import { usePlan } from "@/lib/plan";
 import { useTrade } from "@/lib/trades";
 
 type Row = Record<string, unknown>;
@@ -106,7 +108,10 @@ const DEFAULT_DAYS: Record<Source, number> = { permits: 90, licenses: 180, news:
 
 export default function TriggerLeads() {
   const trade = useTrade();
+  const { pro } = usePlan();
   const [opts, setOpts] = useState<Options | null>(null);
+  const [total, setTotal] = useState(0);
+  const [limited, setLimited] = useState(false);
   const [territory, setTerritory] = useState("");
   const [custom, setCustom] = useState("");
   const [source, setSource] = useState<Source>("permits");
@@ -150,8 +155,10 @@ export default function TriggerLeads() {
       const query = { cities, days: days[source], hide_chains: hideChains };
       const path =
         source === "permits" ? "/v1/leads/permits" : source === "licenses" ? (contacts ? "/v1/leads/licenses/contacts" : "/v1/leads/licenses") : source === "news" ? "/v1/leads/news" : "/v1/leads/new-on-map";
-      const res = await api<{ leads: Row[]; not_covered?: string[] }>(path, { method: contacts ? "POST" : "GET", query });
+      const res = await api<{ leads: Row[]; not_covered?: string[]; count: number; limited?: boolean }>(path, { method: contacts ? "POST" : "GET", query });
       setRows(res.leads);
+      setTotal(res.count);
+      setLimited(Boolean(res.limited));
       setNotCovered(res.not_covered ?? []);
       setWithContacts(contacts || source !== "licenses");
     } catch (e) {
@@ -162,7 +169,7 @@ export default function TriggerLeads() {
   }
 
   const current = SOURCES.find((s) => s.id === source)!;
-  const count = rows?.length ?? 0;
+  const count = limited ? total : rows?.length ?? 0;
 
   return (
     <div className="page">
@@ -214,7 +221,11 @@ export default function TriggerLeads() {
       <div className="row">
         <button disabled={!cities || Boolean(loading)} onClick={() => run(false)}>Find leads</button>
         {source === "licenses" && rows && !withContacts && (
-          <button className="ghost" disabled={Boolean(loading)} onClick={() => run(true)}>📞 Look up phone &amp; email</button>
+          pro ? (
+            <button className="ghost" disabled={Boolean(loading)} onClick={() => run(true)}>📞 Look up phone &amp; email</button>
+          ) : (
+            <Link className="button ghost" href="/account/" title="Phone & email lookup is a Pro feature">📞 Look up phone &amp; email · Pro</Link>
+          )
         )}
       </div>
 
@@ -246,7 +257,7 @@ export default function TriggerLeads() {
           {count === 0 ? (
             <div className="notice info">Nothing found for these cities. Try a longer look-back.</div>
           ) : source === "permits" ? (
-            <LeadTable rows={rows} columns={permitCols} csvName="build_outs.csv"
+            <LeadTable rows={rows} total={total} limited={limited} columns={permitCols} csvName="build_outs.csv"
               rowId={(r) => `permit-${r["Permit #"]}`}
               toPipeline={(r) => ({
                 name: String(r.Business || r.Address), category: String(r.Signal),
@@ -256,18 +267,18 @@ export default function TriggerLeads() {
                 ].filter(Boolean).join(" · "),
               })} />
           ) : source === "licenses" ? (
-            <LeadTable rows={rows} columns={licenseCols} csvName="license_leads.csv"
+            <LeadTable rows={rows} total={total} limited={limited} columns={licenseCols} csvName="license_leads.csv"
               rowId={(r) => `abc-${r["ABC file #"]}`}
               toPipeline={(r) => ({
                 name: String(r.Business), category: String(r.Type),
                 note: [r.Trigger, `${r.Address}, ${r.City}`, r.Phone, r.Email, `Owner: ${r["Person to ask for"] || r.Owner}`, r.Pitch && `Pitch: ${r.Pitch}`].filter(Boolean).join(" · "),
               })} />
           ) : source === "news" ? (
-            <LeadTable rows={rows} columns={newsCols} csvName="news_leads.csv"
+            <LeadTable rows={rows} total={total} limited={limited} columns={newsCols} csvName="news_leads.csv"
               rowId={(r) => `news-${hash(String(r.Link))}`}
               toPipeline={(r) => ({ name: String(r.Headline).slice(0, 80), category: String(r.Signal), note: `${r.Signal} · ${r.City} · ${r.Date} · ${r.Link}` })} />
           ) : (
-            <LeadTable rows={rows} columns={mapCols} csvName="new_on_map.csv"
+            <LeadTable rows={rows} total={total} limited={limited} columns={mapCols} csvName="new_on_map.csv"
               rowId={(r) => `osm-${r["OSM id"]}`}
               toPipeline={(r) => ({
                 name: String(r.Business), category: String(r.Kind),

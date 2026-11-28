@@ -63,3 +63,20 @@ def delete_entry(settings: Settings, user: User, prospect_id: str) -> None:
     r = requests.delete(f"{settings.supabase_url}/rest/v1/pipeline_entries", headers=_headers(settings),
                         params={"owner_user_id": f"eq.{user.id}", "prospect_id": f"eq.{prospect_id}"}, timeout=20)
     _check(r)
+
+
+def count_entries(settings: Settings, user: User) -> int:
+    r = requests.get(f"{settings.supabase_url}/rest/v1/pipeline_entries",
+                     headers=_headers(settings, {"Prefer": "count=exact", "Range": "0-0"}),
+                     params={"select": "prospect_id", "owner_user_id": f"eq.{user.id}"}, timeout=20)
+    _check(r)
+    total = r.headers.get("content-range", "*/0").rsplit("/", 1)[-1]
+    return int(total) if total.isdigit() else len(r.json())
+
+
+def has_entry(settings: Settings, user: User, prospect_id: str) -> bool:
+    r = requests.get(f"{settings.supabase_url}/rest/v1/pipeline_entries", headers=_headers(settings),
+                     params={"select": "prospect_id", "owner_user_id": f"eq.{user.id}",
+                             "prospect_id": f"eq.{prospect_id}", "limit": "1"}, timeout=20)
+    _check(r)
+    return bool(r.json())

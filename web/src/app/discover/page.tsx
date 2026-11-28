@@ -23,6 +23,8 @@ export default function Discover() {
   const [cats, setCats] = useState<string[]>([]);
   const [profile, setProfile] = useState("");
   const [rows, setRows] = useState<Row[] | null>(null);
+  const [total, setTotal] = useState(0);
+  const [limited, setLimited] = useState(false);
   const [label, setLabel] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -43,10 +45,12 @@ export default function Discover() {
     setError("");
     setRows(null);
     try {
-      const res = await api<{ area: string; prospects: Row[] }>("/v1/discover", {
+      const res = await api<{ area: string; prospects: Row[]; count: number; limited?: boolean }>("/v1/discover", {
         query: { metro, area, categories: cats.join(","), profile },
       });
       setRows(res.prospects);
+      setTotal(res.count);
+      setLimited(Boolean(res.limited));
       setLabel(res.area);
     } catch (e) {
       setError((e as Error).message);
@@ -100,11 +104,11 @@ export default function Discover() {
       {rows && (
         <>
           <div className="stats">
-            <div className="stat"><b>{rows.length}</b><span>Businesses in {label}</span></div>
+            <div className="stat"><b>{limited ? total : rows.length}</b><span>Businesses in {label}</span></div>
             <div className="stat"><b>{rows.filter((r) => Number(r.score) >= 70).length}</b><span>Hot (score 70+)</span></div>
             <div className="stat"><b>{rows.filter((r) => r.phone).length}</b><span>With phone</span></div>
           </div>
-          <LeadTable rows={rows} columns={cols} csvName="discover.csv" rowId={(r) => String(r.id)}
+          <LeadTable rows={rows} total={total} limited={limited} columns={cols} csvName="discover.csv" rowId={(r) => String(r.id)}
             toPipeline={(r) => ({
               name: String(r.name), category: String(r.category),
               note: [r.address, r.phone, r.website].filter(Boolean).join(" · "),

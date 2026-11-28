@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { api, type Options } from "@/lib/api";
+import Link from "next/link";
+import { usePlan } from "@/lib/plan";
 import { useTrade } from "@/lib/trades";
 
 type Digest = {
@@ -15,6 +17,7 @@ type Digest = {
 
 export default function WeeklyEmail() {
   const trade = useTrade();
+  const { pro } = usePlan();
   const [d, setD] = useState<Digest | null>(null);
   const [territories, setTerritories] = useState<string[]>([]);
   const [custom, setCustom] = useState("");
@@ -82,7 +85,10 @@ export default function WeeklyEmail() {
       <h1>Weekly email</h1>
       <p className="lede">Every Monday morning: the new leads in your territory that you haven&apos;t been sent before, ranked for {trade.emoji} {trade.label}.</p>
 
-      <div className="panel">
+      {!pro && (
+        <div className="notice info upsell">The weekly email is part of Pro. <Link href="/account/">Upgrade</Link> to turn it on.</div>
+      )}
+      <div className="panel" style={pro ? undefined : { opacity: 0.6, pointerEvents: "none" }}>
         <label className="check-label" style={{ fontSize: "1.05rem" }}>
           <input type="checkbox" checked={d.active} onChange={(e) => setD({ ...d, active: e.target.checked })} />
           <b>Send me the weekly email</b> <span className="muted">to {d.email}</span>

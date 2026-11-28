@@ -58,7 +58,7 @@ class DigestTests(unittest.TestCase):
         sub = {"user_id": "u-1", "email": "rep@example.com", "territory": "Palo Alto", "sources": ["permits"],
                "seen": ["permit:26BLD-1"]}
         with mock.patch.object(digest, "due_subscriptions", return_value=[sub]), \
-                mock.patch.object(digest, "user_trade", return_value="security"), \
+                mock.patch.object(digest, "user_profile", return_value=("security", True)), \
                 mock.patch.object(digest, "send_email") as send, mock.patch.object(digest, "mark_sent") as mark:
             report = digest.run_all(SETTINGS, {"permits": lambda c: [PERMIT, PERMIT2]}, lambda t: ("Palo Alto",),
                                     now=datetime(2026, 11, 30, tzinfo=timezone.utc))
@@ -73,7 +73,7 @@ class DigestTests(unittest.TestCase):
 @unittest.skipIf(digest is None, "fastapi not installed")
 class DigestApiTests(unittest.TestCase):
     def setUp(self):
-        main.app.dependency_overrides[current_user] = lambda: User("u-1", "rep@example.com")
+        main.app.dependency_overrides[current_user] = lambda: User("u-1", "rep@example.com", pro=True)
         main.app.dependency_overrides[get_settings] = lambda: SETTINGS
         main._last_call.clear()
         self.client = TestClient(main.app)

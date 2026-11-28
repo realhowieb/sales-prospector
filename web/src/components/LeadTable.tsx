@@ -1,7 +1,9 @@
 "use client";
 
 import { useMemo, useState, type ReactNode } from "react";
+import Link from "next/link";
 import { addToPipeline, downloadCsv, toCsv } from "@/lib/api";
+import { usePlan } from "@/lib/plan";
 
 export type Column<T> = { key: string; label: string; render?: (row: T) => ReactNode; className?: string };
 
@@ -11,6 +13,8 @@ type Props<T> = {
   rowId: (row: T) => string;
   toPipeline: (row: T) => { name: string; category: string; note: string };
   csvName: string;
+  total?: number; // how many the search found (free plans see the top few)
+  limited?: boolean;
 };
 
 export function ScoreBar({ value }: { value: number }) {
@@ -33,7 +37,8 @@ export function ExtLink({ href, label }: { href?: string; label?: string }) {
   );
 }
 
-export default function LeadTable<T extends Record<string, unknown>>({ rows, columns, rowId, toPipeline, csvName }: Props<T>) {
+export default function LeadTable<T extends Record<string, unknown>>({ rows, columns, rowId, toPipeline, csvName, total, limited }: Props<T>) {
+  const { pro } = usePlan();
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [added, setAdded] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
@@ -82,9 +87,13 @@ export default function LeadTable<T extends Record<string, unknown>>({ rows, col
         <button disabled={!picked.size || busy} onClick={addPicked}>
           {busy ? "Adding…" : `Add ${picked.size || ""} to pipeline`}
         </button>
-        <button className="ghost" onClick={() => downloadCsv(csvName, toCsv(shown, columns.map((c) => c.key)))}>
-          Download CSV
-        </button>
+        {pro ? (
+          <button className="ghost" onClick={() => downloadCsv(csvName, toCsv(shown, columns.map((c) => c.key)))}>
+            Download CSV
+          </button>
+        ) : (
+          <Link className="button ghost" href="/account/" title="CSV download is a Pro feature">Download CSV · Pro</Link>
+        )}
       </div>
       {msg && <div className={`notice ${msg.kind}`}>{msg.text}</div>}
       <div className="scroll">
@@ -120,6 +129,11 @@ export default function LeadTable<T extends Record<string, unknown>>({ rows, col
           </tbody>
         </table>
       </div>
+      {limited && (
+        <div className="notice info upsell">
+          Showing the top {rows.length} of {total ?? rows.length} leads. <Link href="/account/">Upgrade to Pro</Link> to see all of them, plus the weekly email, phone &amp; email lookup and CSV.
+        </div>
+      )}
     </div>
   );
 }

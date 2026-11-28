@@ -61,7 +61,9 @@ button, .button {
   padding: 8px 14px; border-radius: 8px; cursor: pointer;
 }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
-button.ghost { background: transparent; color: var(--text); border-color: var(--line); }
+button.ghost, .button.ghost { background: transparent; color: var(--text); border-color: var(--line); }
+.button { display: inline-block; text-decoration: none; }
+.button:hover { text-decoration: none; }
 input, select, textarea {
   font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--line);
   border-radius: 8px; padding: 8px 10px; min-width: 0;
@@ -132,3 +134,16 @@ td.wrap { min-width: 220px; }
   .controls .wide { grid-column: auto; }
   .table-tools .search { width: 100%; }
 }
+
+/* Plans */
+.plan-pill { padding: 4px 10px; border-radius: 999px; font-size: 0.8rem; font-weight: 600; background: var(--accent); color: #fff; white-space: nowrap; }
+.plan-pill:hover { text-decoration: none; opacity: 0.9; }
+.plan-pill.pro { background: var(--accent-soft); color: var(--accent); }
+.upsell a { font-weight: 600; }
+.plans { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; margin: 16px 0; }
+.plan h2 { margin: 0 0 4px; }
+.plan .price { font-size: 2rem; font-weight: 700; margin: 0 0 8px; }
+.plan .price small { font-size: 0.9rem; font-weight: 400; color: var(--muted); }
+.plan ul { padding-left: 18px; margin: 8px 0 12px; line-height: 1.7; }
+.plan.featured { border-color: var(--accent); }
+.plan.current { outline: 2px solid var(--accent-soft); }

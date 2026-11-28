@@ -21,7 +21,7 @@ from tests.test_trigger_leads import CSV
 class ApiTests(unittest.TestCase):
     def setUp(self):
         cache.clear()
-        main.app.dependency_overrides[current_user] = lambda: User("u-1", "rep@example.com")
+        main.app.dependency_overrides[current_user] = lambda: User("u-1", "rep@example.com", pro=True)
         main.app.dependency_overrides[get_settings] = lambda: SETTINGS
         self.client = TestClient(main.app)
 

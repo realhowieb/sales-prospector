@@ -218,15 +218,18 @@ def save_subscription(settings: Settings, user_id: str, email: str, active: bool
     return out[0] if out else row
 
 
-def user_trade(settings: Settings, user_id: str) -> str:
-    """The trade a rep picked (Supabase user metadata); security if unset or unreadable."""
+def user_profile(settings: Settings, user_id: str) -> tuple[str, bool]:
+    """(trade, is_pro) from the rep's Supabase account; (security, False) if unreadable."""
+    from api import billing  # local import: billing imports settings only, but keep digest importable alone
+
     try:
         r = requests.get(f"{settings.supabase_url}/auth/v1/admin/users/{user_id}", headers=_headers(settings),
                          timeout=15)
-        meta = (r.json().get("user_metadata") or {}) if r.status_code == 200 else {}
-        return meta.get("trade") if meta.get("trade") in trades.TRADES else trades.DEFAULT_TRADE
+        data = r.json() if r.status_code == 200 else {}
     except Exception:  # noqa: BLE001
-        return trades.DEFAULT_TRADE
+        data = {}
+    trade = (data.get("user_metadata") or {}).get("trade")
+    return (trade if trade in trades.TRADES else trades.DEFAULT_TRADE), billing.is_pro(data.get("app_metadata"))
 
 
 def due_subscriptions(settings: Settings, now: datetime) -> list[dict]:
@@ -261,8 +264,12 @@ def run_all(settings: Settings, loaders: dict[str, Loader], parse_cities: Callab
             if key not in gathered:
                 gathered[key] = gather(cities, sources, loaders)
             found, errors = gathered[key]
+            trade, pro = user_profile(settings, sub["user_id"])
+            if not pro:  # the weekly email is a Pro feature; a lapsed plan just stops it
+                report["skipped"] += 1
+                continue
             seen = list(sub.get("seen") or [])
-            sections, totals, new_keys = fresh(for_trade(found, user_trade(settings, sub["user_id"])), set(seen))
+            sections, totals, new_keys = fresh(for_trade(found, trade), set(seen))
             subject, text, body = build_email(sub.get("territory") or DEFAULT_TERRITORY, sections,
                                               settings.web_url, totals)
             if errors:
