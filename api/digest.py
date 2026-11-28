@@ -17,6 +17,7 @@ from typing import Callable
 import requests
 from fastapi import HTTPException
 
+import trades
 from api.settings import Settings
 
 SOURCES = {
@@ -55,6 +56,14 @@ def _money(v) -> str:
 
 def describe(source: str, row: dict) -> tuple[str, str, str]:
     """(title, detail, link) for one lead."""
+    title, detail, link = _describe(source, row)
+    if row.get("Pitch"):
+        detail = f"{detail} · Pitch: {row['Pitch']}"
+    return title, detail, link
+
+
+def _describe(source: str, row: dict) -> tuple[str, str, str]:
+    """(title, detail, link) without the pitch."""
     if source == "permits":
         title = row.get("Business") or row.get("Address") or "Commercial permit"
         detail = " · ".join(x for x in (row.get("Signal"), row.get("Address"), _money(row.get("Value")),
@@ -132,6 +141,10 @@ def gather(cities: tuple[str, ...], sources: list[str], loaders: dict[str, Loade
     return found, errors
 
 
+def for_trade(found: dict[str, list[dict]], trade: str | None) -> dict[str, list[dict]]:
+    return {source: trades.rescore(source, rows, trade) for source, rows in found.items()}
+
+
 def fresh(found: dict[str, list[dict]], seen: set[str]) -> tuple[dict, dict, list[str]]:
     """-> (sections capped for the email, totals per source, every new key)."""
     sections, totals, keys = {}, {}, []
@@ -205,6 +218,17 @@ def save_subscription(settings: Settings, user_id: str, email: str, active: bool
     return out[0] if out else row
 
 
+def user_trade(settings: Settings, user_id: str) -> str:
+    """The trade a rep picked (Supabase user metadata); security if unset or unreadable."""
+    try:
+        r = requests.get(f"{settings.supabase_url}/auth/v1/admin/users/{user_id}", headers=_headers(settings),
+                         timeout=15)
+        meta = (r.json().get("user_metadata") or {}) if r.status_code == 200 else {}
+        return meta.get("trade") if meta.get("trade") in trades.TRADES else trades.DEFAULT_TRADE
+    except Exception:  # noqa: BLE001
+        return trades.DEFAULT_TRADE
+
+
 def due_subscriptions(settings: Settings, now: datetime) -> list[dict]:
     cutoff = (now - RESEND_AFTER).isoformat()
     r = requests.get(f"{settings.supabase_url}/rest/v1/lead_digests", headers=_headers(settings),
@@ -238,7 +262,7 @@ def run_all(settings: Settings, loaders: dict[str, Loader], parse_cities: Callab
                 gathered[key] = gather(cities, sources, loaders)
             found, errors = gathered[key]
             seen = list(sub.get("seen") or [])
-            sections, totals, new_keys = fresh(found, set(seen))
+            sections, totals, new_keys = fresh(for_trade(found, user_trade(settings, sub["user_id"])), set(seen))
             subject, text, body = build_email(sub.get("territory") or DEFAULT_TERRITORY, sections,
                                               settings.web_url, totals)
             if errors:
@@ -254,10 +278,10 @@ def run_all(settings: Settings, loaders: dict[str, Loader], parse_cities: Callab
 
 
 def send_test(settings: Settings, email: str, territory: str, sources: list[str], loaders: dict[str, Loader],
-              parse_cities: Callable[[str], tuple[str, ...]]) -> dict:
+              parse_cities: Callable[[str], tuple[str, ...]], trade: str | None = None) -> dict:
     """Send what the email looks like right now (ignores and doesn't change 'already sent')."""
     found, errors = gather(parse_cities(territory), sources, loaders)
-    sections, totals, _ = fresh(found, set())
+    sections, totals, _ = fresh(for_trade(found, trade), set())
     subject, text, body = build_email(territory, sections, settings.web_url, totals)
     send_email(settings, email, "[Test] " + subject, text, body)
     return {"sent_to": email, "leads": sum(totals.values()), "unavailable": sorted(errors)}

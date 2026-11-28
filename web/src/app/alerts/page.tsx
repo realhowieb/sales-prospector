@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { api, type Options } from "@/lib/api";
+import { useTrade } from "@/lib/trades";
 
 type Digest = {
   active: boolean;
@@ -13,6 +14,7 @@ type Digest = {
 };
 
 export default function WeeklyEmail() {
+  const trade = useTrade();
   const [d, setD] = useState<Digest | null>(null);
   const [territories, setTerritories] = useState<string[]>([]);
   const [custom, setCustom] = useState("");
@@ -62,7 +64,7 @@ export default function WeeklyEmail() {
     setBusy("test");
     setMsg({ kind: "info", text: "Gathering this week's leads and sending a test (up to a minute)…" });
     try {
-      const r = await api<{ sent_to: string; leads: number; unavailable: string[] }>("/v1/digest/test", { method: "POST", body });
+      const r = await api<{ sent_to: string; leads: number; unavailable: string[] }>("/v1/digest/test", { method: "POST", body: { ...body, trade: trade.id } });
       const skipped = r.unavailable.length ? ` (${r.unavailable.map((s) => d!.sources_available[s]).join(", ")} didn't respond)` : "";
       setMsg({ kind: "ok", text: `Test sent to ${r.sent_to} with ${r.leads} leads${skipped}. Check your inbox.` });
     } catch (e) {
@@ -78,7 +80,7 @@ export default function WeeklyEmail() {
   return (
     <div className="page">
       <h1>Weekly email</h1>
-      <p className="lede">Every Monday morning: the new leads in your territory that you haven&apos;t been sent before.</p>
+      <p className="lede">Every Monday morning: the new leads in your territory that you haven&apos;t been sent before, ranked for {trade.emoji} {trade.label}.</p>
 
       <div className="panel">
         <label className="check-label" style={{ fontSize: "1.05rem" }}>

@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field
 
 import discover_core
 import permits
+import trades
 import trigger_leads
 from api import digest
 from api import pipeline as pipe
@@ -191,60 +192,66 @@ def options(user: User = Depends(current_user)) -> dict:
         "categories": list(discover_core.CATEGORIES),
         "profiles": list(PRODUCT_PROFILES),
         "stages": pipe.STAGES,
+        "trades": trades.options(),
     }
 
 
 @app.get("/v1/leads/licenses")
 def licenses(cities: tuple[str, ...] = Depends(parse_cities), days: int = Query(180, ge=30, le=365),
-             hide_chains: bool = True, user: User = Depends(current_user)) -> dict:
-    rows = _chain_filter(_licenses(cities, days), hide_chains, "Chain")
+             hide_chains: bool = True, trade: str = trades.DEFAULT_TRADE, user: User = Depends(current_user)) -> dict:
+    rows = trades.rescore("licenses", _chain_filter(_licenses(cities, days), hide_chains, "Chain"), trade)
     return {"cities": cities, "count": len(rows), "leads": rows}
 
 
 @app.post("/v1/leads/licenses/contacts")
 def license_contacts(cities: tuple[str, ...] = Depends(parse_cities), days: int = Query(180, ge=30, le=365),
-                     hide_chains: bool = True, user: User = Depends(current_user)) -> dict:
+                     hide_chains: bool = True, trade: str = trades.DEFAULT_TRADE,
+                     user: User = Depends(current_user)) -> dict:
     def compute():
         leads = _licenses(cities, days)
         listings = overpass(trigger_leads.osm_contact_query(territory_bbox(cities)))
         return trigger_leads.enrich_contacts(leads, listings, session=requests, user_agent=UA)
 
-    rows = _chain_filter([dict(r) for r in cached(("contacts", cities, days), 24 * 3600, compute)],
-                         hide_chains, "Chain")
+    rows = trades.rescore("licenses", _chain_filter([dict(r) for r in cached(("contacts", cities, days), 24 * 3600,
+                                                                             compute)], hide_chains, "Chain"), trade)
     return {"cities": cities, "count": len(rows), "leads": rows}
 
 
 @app.get("/v1/leads/news")
 def news_leads(cities: tuple[str, ...] = Depends(parse_cities), days: int = Query(30, ge=7, le=60),
-               user: User = Depends(current_user)) -> dict:
-    rows = _news_rows(cities, days)
+               trade: str = trades.DEFAULT_TRADE, user: User = Depends(current_user)) -> dict:
+    rows = trades.rescore("news", _news_rows(cities, days), trade)
     return {"cities": cities, "count": len(rows), "leads": rows}
 
 
 @app.get("/v1/leads/new-on-map")
 def new_on_map(cities: tuple[str, ...] = Depends(parse_cities), days: int = Query(60, ge=7, le=180),
-               hide_chains: bool = True, user: User = Depends(current_user)) -> dict:
-    rows = [r for r in _new_on_map_rows(cities, days) if not (hide_chains and r.get("Note") == "Chain")]
+               hide_chains: bool = True, trade: str = trades.DEFAULT_TRADE,
+               user: User = Depends(current_user)) -> dict:
+    rows = trades.rescore("map", [r for r in _new_on_map_rows(cities, days)
+                                  if not (hide_chains and r.get("Note") == "Chain")], trade)
     return {"cities": cities, "count": len(rows), "leads": rows}
 
 
 @app.get("/v1/leads/permits")
 def permit_leads(cities: tuple[str, ...] = Depends(parse_cities), days: int = Query(90, ge=14, le=365),
-                 hide_chains: bool = True, include_minor: bool = False,
+                 hide_chains: bool = True, include_minor: bool = False, trade: str = trades.DEFAULT_TRADE,
                  user: User = Depends(current_user)) -> dict:
     covered = [c for c in cities if c in permits.COVERED_CITIES]
-    rows = _chain_filter([dict(r) for r in _permit_rows(cities, days, include_minor)], hide_chains, "Chain")
+    rows = trades.rescore("permits", _chain_filter([dict(r) for r in _permit_rows(cities, days, include_minor)],
+                                                   hide_chains, "Chain"), trade)
     return {"cities": cities, "covered": covered, "not_covered": [c for c in cities if c not in covered],
             "count": len(rows), "leads": rows}
 
 
 @app.get("/v1/discover")
 def discover(metro: str = "", area: str = "", categories: str = Query(..., description="Comma-separated"),
-             profile: str = "Security systems", cap: int = Query(200, ge=10, le=500),
+             profile: str = "", trade: str = trades.DEFAULT_TRADE, cap: int = Query(200, ge=10, le=500),
              user: User = Depends(current_user)) -> dict:
     cats = [c.strip() for c in categories.split(",") if c.strip() in discover_core.CATEGORIES]
     if not cats:
         raise HTTPException(422, "Pick at least one category.")
+    profile = profile or trades.get(trade)["profile"]
     if profile not in PRODUCT_PROFILES:
         raise HTTPException(422, "Unknown sales profile.")
     if area.strip():
@@ -299,6 +306,7 @@ def pipeline_delete(prospect_id: str, user: User = Depends(current_user),
 
 class DigestSettings(BaseModel):
     active: bool = True
+    trade: str = trades.DEFAULT_TRADE
     territory: str = Field(digest.DEFAULT_TERRITORY, max_length=500)
     sources: list[str] = Field(default_factory=lambda: list(digest.SOURCES))
 
@@ -326,7 +334,7 @@ def digest_test(body: DigestSettings, user: User = Depends(current_user),
                 settings: Settings = Depends(get_settings)) -> dict:
     _throttle(f"digest-test:{user.id}", 120)
     sources = [s for s in body.sources if s in digest.SOURCES] or list(digest.SOURCES)
-    return digest.send_test(settings, user.email, body.territory, sources, DIGEST_LOADERS, _cities)
+    return digest.send_test(settings, user.email, body.territory, sources, DIGEST_LOADERS, _cities, body.trade)
 
 
 @app.post("/internal/digest/run")

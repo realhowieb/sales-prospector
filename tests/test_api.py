@@ -98,6 +98,18 @@ class ApiTests(unittest.TestCase):
         none = self.client.get("/v1/leads/permits", params={"cities": "Belmont"}).json()
         self.assertEqual((none["count"], none["covered"]), (0, []))
 
+    def test_trade_reranks_and_discover_profile_follows(self):
+        with mock.patch.object(main, "abc_csv", return_value=CSV):
+            r = self.client.get("/v1/leads/licenses", params={"cities": "Mountain View, Menlo Park", "trade": "pos"})
+        self.assertTrue(all("Pitch" in x and "Fit" in x for x in r.json()["leads"]))
+        self.assertIn("trades", self.client.get("/v1/options").json())
+        els = [{"type": "node", "id": 9, "lat": 37.4, "lon": -122.1, "tags": {"name": "Joe's Cafe", "amenity": "cafe"}}]
+        with mock.patch.object(main, "discover_fetch", return_value=els):
+            r = self.client.get("/v1/discover", params={"metro": "Peninsula, CA", "categories": "Restaurant & Café",
+                                                        "trade": "cleaning"})
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("janitorial", r.json()["prospects"][0]["insight"])
+
     def test_pipeline_is_scoped_to_user(self):
         calls = {}
 

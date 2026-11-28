@@ -14,6 +14,8 @@ export async function api<T>(path: string, opts: { method?: string; query?: Quer
   const { data } = await supabase.auth.getSession();
   const token = data.session?.access_token;
   const qs = new URLSearchParams();
+  const trade = data.session?.user.user_metadata?.trade as string | undefined;
+  if (trade) qs.set("trade", trade);
   for (const [k, v] of Object.entries(opts.query ?? {})) if (v !== undefined && v !== "") qs.set(k, String(v));
   let res: Response;
   try {
@@ -46,6 +48,7 @@ export type Options = {
   categories: string[];
   profiles: string[];
   stages: string[];
+  trades: { id: string; label: string; emoji: string; sells: string }[];
 };
 
 export type PipelineEntry = {

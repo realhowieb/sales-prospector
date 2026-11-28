@@ -58,6 +58,7 @@ class DigestTests(unittest.TestCase):
         sub = {"user_id": "u-1", "email": "rep@example.com", "territory": "Palo Alto", "sources": ["permits"],
                "seen": ["permit:26BLD-1"]}
         with mock.patch.object(digest, "due_subscriptions", return_value=[sub]), \
+                mock.patch.object(digest, "user_trade", return_value="security"), \
                 mock.patch.object(digest, "send_email") as send, mock.patch.object(digest, "mark_sent") as mark:
             report = digest.run_all(SETTINGS, {"permits": lambda c: [PERMIT, PERMIT2]}, lambda t: ("Palo Alto",),
                                     now=datetime(2026, 11, 30, tzinfo=timezone.utc))
@@ -66,6 +67,7 @@ class DigestTests(unittest.TestCase):
         self.assertIn("Neko Health", send.call_args.args[3])
         self.assertNotIn("Rivian", send.call_args.args[3])
         self.assertEqual(mark.call_args.args[2], ["permit:26BLD-1", "permit:26BLD-2"])
+        self.assertIn("Pitch:", send.call_args.args[3])
 
 
 @unittest.skipIf(digest is None, "fastapi not installed")

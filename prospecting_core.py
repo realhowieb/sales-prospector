@@ -44,6 +44,36 @@ PRODUCT_PROFILES: dict[str, dict] = {
         "fit_bonus": 15,
         "angle": "payment processing and fee-savings conversation",
     },
+    "Solar & energy": {
+        "weights": {"phone": 25, "no_website": 5, "address": 30, "independent": 25},
+        "fit_categories": {"Auto Services", "Retail Boutique", "Fitness & Gym", "Professional Svcs"},
+        "fit_bonus": 15,
+        "angle": "solar, storage and energy-savings conversation",
+    },
+    "HVAC & mechanical": {
+        "weights": {"phone": 30, "no_website": 5, "address": 30, "independent": 20},
+        "fit_categories": {"Restaurant & Café", "Medical & Dental", "Fitness & Gym", "Auto Services"},
+        "fit_bonus": 15,
+        "angle": "HVAC service-contract conversation",
+    },
+    "Commercial cleaning": {
+        "weights": {"phone": 30, "no_website": 5, "address": 30, "independent": 20},
+        "fit_categories": {"Medical & Dental", "Professional Svcs", "Fitness & Gym", "Beauty & Spa"},
+        "fit_bonus": 15,
+        "angle": "recurring janitorial conversation",
+    },
+    "IT & telecom": {
+        "weights": {"phone": 30, "no_website": 10, "address": 20, "independent": 20},
+        "fit_categories": {"Professional Svcs", "Medical & Dental", "Retail Boutique"},
+        "fit_bonus": 20,
+        "angle": "managed IT, internet and phones conversation",
+    },
+    "Office furniture": {
+        "weights": {"phone": 25, "no_website": 5, "address": 30, "independent": 20},
+        "fit_categories": {"Professional Svcs", "Medical & Dental"},
+        "fit_bonus": 20,
+        "angle": "workspace and furniture conversation",
+    },
 }
 
 
