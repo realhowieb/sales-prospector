@@ -111,7 +111,8 @@ export default function LeadTable<T extends Record<string, unknown>>({ rows, col
                   </td>
                   {columns.map((c) => (
                     <td key={c.key} className={c.className}>
-                      {c.render ? c.render(r) : String(r[c.key] ?? "")}
+                      {/* Table cells ignore min-width; an inner block keeps text columns readable. */}
+                      <div className="cell">{c.render ? c.render(r) : String(r[c.key] ?? "")}</div>
                     </td>
                   ))}
                 </tr>
