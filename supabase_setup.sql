@@ -1237,3 +1237,25 @@ create policy "public read schema migrations" on schema_migrations
 drop policy if exists "admin read admin audit log" on admin_audit_log;
 create policy "admin read admin audit log" on admin_audit_log
   for select using (is_admin_user());
+
+
+-- ------------------------------------------------------------------------- --
+-- WEEKLY EMAIL (migrations/021_lead_digests.sql)
+-- ------------------------------------------------------------------------- --
+-- FirstKnock weekly email: one row per user (territory, sources, on/off, leads already emailed).
+-- Written only by the API with the service key; RLS on with no policies keeps it private.
+create table if not exists lead_digests (
+  user_id      uuid primary key,
+  email        text not null,
+  active       boolean not null default true,
+  territory    text not null default 'Peninsula (Belmont → Mountain View)',
+  sources      text[] not null default '{permits,licenses,news,map}',
+  seen         text[] not null default '{}',
+  last_sent_at timestamptz,
+  created_at   timestamptz not null default now(),
+  updated_at   timestamptz not null default now()
+);
+
+alter table lead_digests enable row level security;
+
+create index if not exists lead_digests_active_idx on lead_digests(active, last_sent_at);

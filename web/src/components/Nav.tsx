@@ -9,6 +9,7 @@ const LINKS = [
   { href: "/", label: "Trigger Leads" },
   { href: "/discover/", label: "Discover" },
   { href: "/pipeline/", label: "My Pipeline" },
+  { href: "/alerts/", label: "Weekly email" },
 ];
 
 export default function Nav() {

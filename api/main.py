@@ -11,14 +11,19 @@ GET  /v1/leads/new-on-map             businesses newly added to OpenStreetMap
 GET  /v1/leads/permits                commercial build-out / move-in permits (Palo Alto so far)
 GET  /v1/discover                     businesses in an area by category, scored
 GET  /v1/pipeline · PUT/DELETE /v1/pipeline/{prospect_id}
+GET/PUT /v1/digest · POST /v1/digest/test   weekly email settings / send a test now
+POST /internal/digest/run            Monday scheduler (X-Digest-Secret header)
 OpenAPI docs at /docs.
 """
 from __future__ import annotations
 
+import time
 from datetime import date, timedelta
 
+import hmac
+
 import requests
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field
@@ -26,6 +31,7 @@ from pydantic import BaseModel, Field
 import discover_core
 import permits
 import trigger_leads
+from api import digest
 from api import pipeline as pipe
 from api.auth import User, current_user, get_settings
 from api.cache import cached
@@ -121,6 +127,49 @@ def _chain_filter(rows: list[dict], hide_chains: bool, key: str) -> list[dict]:
     return [r for r in rows if not (hide_chains and r.get(key))]
 
 
+def _permit_rows(cities: tuple[str, ...], days: int, include_minor: bool = False) -> list[dict]:
+    if "Palo Alto" not in cities:
+        return []
+    return cached(("permits", "Palo Alto", days, include_minor), 12 * 3600,
+                  lambda: permits.parse_palo_alto(palo_alto_csv(), days=days, include_minor=include_minor))
+
+
+def _new_on_map_rows(cities: tuple[str, ...], days: int) -> list[dict]:
+    def compute():
+        since = date.today() - timedelta(days=days)
+        query = trigger_leads.osm_new_query(territory_bbox(cities), since)
+        return trigger_leads.parse_new_on_map(overpass(query, trigger_leads.NEW_ON_MAP_MIRRORS), hide_chains=False)
+
+    return cached(("newmap", cities, days), 12 * 3600, compute)
+
+
+def _news_rows(cities: tuple[str, ...], days: int) -> list[dict]:
+    return cached(("news", cities, days), 6 * 3600, lambda: news(cities, days))
+
+
+# What the weekly email pulls for each source (chains hidden; windows comfortably longer than a week).
+DIGEST_LOADERS = {
+    "permits": lambda c: _chain_filter([dict(r) for r in _permit_rows(c, 30)], True, "Chain"),
+    "licenses": lambda c: _chain_filter(_licenses(c, 90), True, "Chain"),
+    "news": lambda c: _news_rows(c, 14),
+    "map": lambda c: [r for r in _new_on_map_rows(c, 30) if r.get("Note") != "Chain"],
+}
+
+
+def _cities(territory: str) -> tuple[str, ...]:
+    return parse_cities(territory)
+
+
+_last_call: dict[str, float] = {}
+
+
+def _throttle(key: str, seconds: float) -> None:
+    now = time.time()
+    if now - _last_call.get(key, 0) < seconds:
+        raise HTTPException(429, "You just sent a test — wait a couple of minutes before sending another.")
+    _last_call[key] = now
+
+
 # --------------------------------------------------------------------------- #
 # Routes
 # --------------------------------------------------------------------------- #
@@ -168,20 +217,14 @@ def license_contacts(cities: tuple[str, ...] = Depends(parse_cities), days: int 
 @app.get("/v1/leads/news")
 def news_leads(cities: tuple[str, ...] = Depends(parse_cities), days: int = Query(30, ge=7, le=60),
                user: User = Depends(current_user)) -> dict:
-    rows = cached(("news", cities, days), 6 * 3600, lambda: news(cities, days))
+    rows = _news_rows(cities, days)
     return {"cities": cities, "count": len(rows), "leads": rows}
 
 
 @app.get("/v1/leads/new-on-map")
 def new_on_map(cities: tuple[str, ...] = Depends(parse_cities), days: int = Query(60, ge=7, le=180),
                hide_chains: bool = True, user: User = Depends(current_user)) -> dict:
-    def compute():
-        since = date.today() - timedelta(days=days)
-        query = trigger_leads.osm_new_query(territory_bbox(cities), since)
-        return trigger_leads.parse_new_on_map(overpass(query, trigger_leads.NEW_ON_MAP_MIRRORS), hide_chains=False)
-
-    rows = [r for r in cached(("newmap", cities, days), 12 * 3600, compute)
-            if not (hide_chains and r.get("Note") == "Chain")]
+    rows = [r for r in _new_on_map_rows(cities, days) if not (hide_chains and r.get("Note") == "Chain")]
     return {"cities": cities, "count": len(rows), "leads": rows}
 
 
@@ -190,11 +233,7 @@ def permit_leads(cities: tuple[str, ...] = Depends(parse_cities), days: int = Qu
                  hide_chains: bool = True, include_minor: bool = False,
                  user: User = Depends(current_user)) -> dict:
     covered = [c for c in cities if c in permits.COVERED_CITIES]
-    rows: list[dict] = []
-    if "Palo Alto" in covered:
-        rows = cached(("permits", "Palo Alto", days, include_minor), 12 * 3600,
-                      lambda: permits.parse_palo_alto(palo_alto_csv(), days=days, include_minor=include_minor))
-    rows = _chain_filter([dict(r) for r in rows], hide_chains, "Chain")
+    rows = _chain_filter([dict(r) for r in _permit_rows(cities, days, include_minor)], hide_chains, "Chain")
     return {"cities": cities, "covered": covered, "not_covered": [c for c in cities if c not in covered],
             "count": len(rows), "leads": rows}
 
@@ -256,3 +295,43 @@ def pipeline_delete(prospect_id: str, user: User = Depends(current_user),
                     settings: Settings = Depends(get_settings)) -> dict:
     pipe.delete_entry(settings, user, prospect_id)
     return {"deleted": prospect_id}
+
+
+class DigestSettings(BaseModel):
+    active: bool = True
+    territory: str = Field(digest.DEFAULT_TERRITORY, max_length=500)
+    sources: list[str] = Field(default_factory=lambda: list(digest.SOURCES))
+
+
+@app.get("/v1/digest")
+def digest_get(user: User = Depends(current_user), settings: Settings = Depends(get_settings)) -> dict:
+    sub = digest.get_subscription(settings, user.id) or {
+        "active": False, "territory": digest.DEFAULT_TERRITORY, "sources": list(digest.SOURCES), "last_sent_at": None}
+    return {**{k: sub.get(k) for k in digest.PUBLIC}, "email": user.email, "sources_available": digest.SOURCES}
+
+
+@app.put("/v1/digest")
+def digest_put(body: DigestSettings, user: User = Depends(current_user),
+               settings: Settings = Depends(get_settings)) -> dict:
+    _cities(body.territory)  # 422 for an unusable territory
+    sources = [s for s in body.sources if s in digest.SOURCES]
+    if body.active and not sources:
+        raise HTTPException(422, "Pick at least one source.")
+    sub = digest.save_subscription(settings, user.id, user.email, body.active, body.territory, sources)
+    return {k: sub.get(k) for k in digest.PUBLIC}
+
+
+@app.post("/v1/digest/test")
+def digest_test(body: DigestSettings, user: User = Depends(current_user),
+                settings: Settings = Depends(get_settings)) -> dict:
+    _throttle(f"digest-test:{user.id}", 120)
+    sources = [s for s in body.sources if s in digest.SOURCES] or list(digest.SOURCES)
+    return digest.send_test(settings, user.email, body.territory, sources, DIGEST_LOADERS, _cities)
+
+
+@app.post("/internal/digest/run")
+def digest_run(x_digest_secret: str = Header(default=""), dry_run: bool = False,
+               settings: Settings = Depends(get_settings)) -> dict:
+    if not settings.digest_secret or not hmac.compare_digest(x_digest_secret, settings.digest_secret):
+        raise HTTPException(403, "Forbidden.")
+    return digest.run_all(settings, DIGEST_LOADERS, _cities, dry_run=dry_run)
