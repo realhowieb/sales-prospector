@@ -13,6 +13,7 @@ try:
 except ImportError:  # API deps are optional for the Streamlit app's CI
     main = None
 
+from tests.test_permits import PERMIT_CSV
 from tests.test_trigger_leads import CSV
 
 
@@ -82,6 +83,20 @@ class ApiTests(unittest.TestCase):
         self.assertGreater(body["prospects"][0]["score"], 0)
         bad = self.client.get("/v1/discover", params={"metro": "Peninsula, CA", "categories": "Nope"})
         self.assertEqual(bad.status_code, 422)
+
+    def test_permits_cover_palo_alto_only(self):
+        with mock.patch.object(main, "palo_alto_csv", return_value=PERMIT_CSV), \
+                mock.patch("permits.date") as d:
+            d.today.return_value = __import__("datetime").date(2026, 11, 27)
+            r = self.client.get("/v1/leads/permits", params={"cities": "Palo Alto, Menlo Park"})
+        body = r.json()
+        self.assertEqual(body["covered"], ["Palo Alto"])
+        self.assertEqual(body["not_covered"], ["Menlo Park"])
+        names = [x["Business"] for x in body["leads"]]
+        self.assertIn("Finnegan Law Office", names)
+        self.assertNotIn("Sweetgreen", names)  # chains hidden by default
+        none = self.client.get("/v1/leads/permits", params={"cities": "Belmont"}).json()
+        self.assertEqual((none["count"], none["covered"]), (0, []))
 
     def test_pipeline_is_scoped_to_user(self):
         calls = {}
