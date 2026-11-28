@@ -1,0 +1,32 @@
+name: Weekly lead email
+
+on:
+  schedule:
+    - cron: "0 15 * * 1"  # Mondays 15:00 UTC = 7 AM Pacific (8 AM during daylight time)
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build the emails without sending"
+        type: boolean
+        default: false
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Wake the API (free plan sleeps)
+        run: |
+          for i in $(seq 1 20); do
+            curl -fsS -m 60 https://api.firstknock.hsfinest.com/healthz && exit 0
+            sleep 15
+          done
+          exit 1
+      - name: Send this week's emails
+        env:
+          DIGEST_SECRET: ${{ secrets.DIGEST_SECRET }}
+          DRY_RUN: ${{ inputs.dry_run || false }}
+        run: |
+          curl -fsS -m 1500 -X POST -H "X-Digest-Secret: $DIGEST_SECRET" \
+            "https://api.firstknock.hsfinest.com/internal/digest/run?dry_run=$DRY_RUN" | tee report.json
+          python3 -c "import json,sys; r=json.load(open('report.json')); sys.exit(1 if r.get('failed') else 0)"

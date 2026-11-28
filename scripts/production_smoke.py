@@ -24,7 +24,7 @@ PYTHON_FILES = [
     "discover_core.py", "permits.py",
     "api/main.py",
     "api/auth.py",
-    "api/pipeline.py",
+    "api/pipeline.py", "api/digest.py",
     "api/cache.py",
     "api/settings.py",
 ]
