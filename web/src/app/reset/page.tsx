@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { useSession } from "@/components/AuthGate";
 
@@ -13,6 +13,30 @@ export default function Reset() {
   const [confirm, setConfirm] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [linkProblem, setLinkProblem] = useState("");
+  const [email, setEmail] = useState("");
+  const [sent, setSent] = useState("");
+
+  // Supabase sends expired / already-used links back here with the reason in the URL.
+  useEffect(() => {
+    const params = new URLSearchParams(`${location.hash.replace(/^#/, "")}&${location.search.replace(/^\?/, "")}`);
+    const code = params.get("error_code") || params.get("error");
+    if (!code) return;
+    setLinkProblem(
+      code === "otp_expired"
+        ? "That reset link has expired or was already used. Each new reset email replaces the last one, and links last an hour."
+        : params.get("error_description")?.replace(/\+/g, " ") || "That reset link didn't work.",
+    );
+    history.replaceState(null, "", "/reset/");
+  }, []);
+
+  async function resend(e: React.FormEvent) {
+    e.preventDefault();
+    setError("");
+    const { error: err } = await supabase.auth.resetPasswordForEmail(email.trim(), { redirectTo: `${location.origin}/reset/` });
+    if (err) return setError(err.message);
+    setSent(email.trim());
+  }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -30,10 +54,28 @@ export default function Reset() {
     return (
       <div className="auth">
         <h1>🔑 Set a new password</h1>
-        <div className="panel">
-          <p>Open this page from the reset link in your email. Links expire after an hour.</p>
-          <Link href="/login/">Request a new reset link →</Link>
-        </div>
+        <form className="panel" onSubmit={resend}>
+          {linkProblem ? (
+            <div className="notice error" style={{ marginTop: 0 }}>{linkProblem}</div>
+          ) : (
+            <p style={{ marginTop: 0 }}>Open this page from the reset link in your email. Links expire after an hour.</p>
+          )}
+          {sent ? (
+            <div className="notice ok">
+              New link sent to {sent}. Open the <b>newest</b> email from FirstKnock and click Reset password (check spam too).
+            </div>
+          ) : (
+            <>
+              <label>
+                Email
+                <input type="email" required autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} />
+              </label>
+              <button type="submit">Send a new reset link</button>
+            </>
+          )}
+          {error && <div className="notice error">{error}</div>}
+          <Link href="/login/">Back to sign in</Link>
+        </form>
       </div>
     );
   }
