@@ -54,6 +54,9 @@ export default function AuthGate({ children }: { children: ReactNode }) {
   if (!authConfigured) {
     return <div className="page"><div className="notice error">Sign-in isn&apos;t configured for this site yet.</div></div>;
   }
-  if (!ready || (!session && !isPublic)) return <div className="page"><p className="muted">Loading…</p></div>;
+  if (!ready || (!session && !isPublic)) {
+    const waiting = pathname.startsWith("/reset") ? "Checking your reset link…" : "Loading…";
+    return <div className="page"><p className="muted">{waiting}</p></div>;
+  }
   return <SessionContext.Provider value={session}>{children}</SessionContext.Provider>;
 }
