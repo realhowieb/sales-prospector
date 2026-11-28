@@ -13,7 +13,7 @@ const SOURCES: { id: Source; label: string; blurb: string }[] = [
     id: "permits",
     label: "🏗️ Build-outs & move-ins",
     blurb:
-      "Commercial building permits: tenant improvements (TI) and Use & Occupancy (U&O) certificates. A company files these weeks before it moves in — while it is still choosing vendors for the new space. Palo Alto for now; more cities as their data becomes available.",
+      "Commercial building permits: tenant improvements (TI) and Use & Occupancy (U&O) certificates. A company files these weeks before it moves in — while it is still choosing vendors for the new space. Palo Alto, San Jose and San Francisco so far; more cities as they publish their data.",
   },
   {
     id: "licenses",

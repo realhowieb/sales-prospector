@@ -128,11 +128,48 @@ def _chain_filter(rows: list[dict], hide_chains: bool, key: str) -> list[dict]:
     return [r for r in rows if not (hide_chains and r.get(key))]
 
 
+def san_jose_csv() -> str:
+    def compute():
+        try:
+            return permits.download_san_jose(requests, UA)
+        except Exception as exc:
+            raise HTTPException(503, "San Jose's permit data isn't responding right now.") from exc
+
+    return cached("san_jose_permits", 12 * 3600, compute)
+
+
+def san_francisco_rows(days: int) -> list[dict]:
+    def compute():
+        try:
+            return permits.download_san_francisco(requests, UA, date.today() - timedelta(days=days))
+        except Exception as exc:
+            raise HTTPException(503, "San Francisco's permit data isn't responding right now.") from exc
+
+    return cached(("sf_permits", days), 12 * 3600, compute)
+
+
+PERMIT_CITIES = {  # city -> (raw data loader, parser)
+    "Palo Alto": (lambda days: palo_alto_csv(), permits.parse_palo_alto),
+    "San Jose": (lambda days: san_jose_csv(), permits.parse_san_jose),
+    "San Francisco": (san_francisco_rows, permits.parse_san_francisco),
+}
+
+
 def _permit_rows(cities: tuple[str, ...], days: int, include_minor: bool = False) -> list[dict]:
-    if "Palo Alto" not in cities:
-        return []
-    return cached(("permits", "Palo Alto", days, include_minor), 12 * 3600,
-                  lambda: permits.parse_palo_alto(palo_alto_csv(), days=days, include_minor=include_minor))
+    rows: list[dict] = []
+    failed: list[HTTPException] = []
+    for city in cities:
+        if city not in PERMIT_CITIES:
+            continue
+        load, parse = PERMIT_CITIES[city]
+        try:
+            rows += cached(("permits", city, days, include_minor), 12 * 3600,
+                           lambda: parse(load(days), days=days, include_minor=include_minor))
+        except HTTPException as exc:  # one city's feed being down shouldn't hide the others
+            failed.append(exc)
+    if failed and not rows:
+        raise failed[0]
+    return sorted(rows, key=lambda r: (r["Score"], r["Opened"]), reverse=True)
 
 
 def _new_on_map_rows(cities: tuple[str, ...], days: int) -> list[dict]:

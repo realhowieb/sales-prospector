@@ -84,11 +84,25 @@ class ApiTests(unittest.TestCase):
         bad = self.client.get("/v1/discover", params={"metro": "Peninsula, CA", "categories": "Nope"})
         self.assertEqual(bad.status_code, 422)
 
+    def test_permits_one_city_down_does_not_hide_others(self):
+        def down(days):
+            raise main.HTTPException(503, "SF down")
+
+        with mock.patch.object(main, "palo_alto_csv", return_value=PERMIT_CSV), \
+                mock.patch.dict(main.PERMIT_CITIES, {"San Francisco": (down, main.permits.parse_san_francisco)}), \
+                mock.patch("permits.date") as d:
+            d.today.return_value = __import__("datetime").date(2026, 11, 27)
+            d.fromisoformat = __import__("datetime").date.fromisoformat
+            r = self.client.get("/v1/leads/permits", params={"cities": "Palo Alto, San Francisco"})
+        self.assertEqual(r.status_code, 200)
+        self.assertGreater(r.json()["count"], 0)
+
     def test_permits_cover_palo_alto_only(self):
         with mock.patch.object(main, "palo_alto_csv", return_value=PERMIT_CSV), \
                 mock.patch("permits.date") as d:
             d.today.return_value = __import__("datetime").date(2026, 11, 27)
             r = self.client.get("/v1/leads/permits", params={"cities": "Palo Alto, Menlo Park"})
+        # (San Jose and San Francisco are covered too; Menlo Park isn't)
         body = r.json()
         self.assertEqual(body["covered"], ["Palo Alto"])
         self.assertEqual(body["not_covered"], ["Menlo Park"])
