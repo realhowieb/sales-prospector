@@ -5,9 +5,15 @@ import LeadTable, { ExtLink, ScoreBar, type Column } from "@/components/LeadTabl
 import { api, type Options } from "@/lib/api";
 
 type Row = Record<string, unknown>;
-type Source = "licenses" | "news" | "map";
+type Source = "permits" | "licenses" | "news" | "map";
 
 const SOURCES: { id: Source; label: string; blurb: string }[] = [
+  {
+    id: "permits",
+    label: "🏗️ Build-outs & move-ins",
+    blurb:
+      "Commercial building permits: tenant improvements (TI) and Use & Occupancy (U&O) certificates. A company files these weeks before it moves in — while it is still choosing alarm, camera and access-control vendors. Palo Alto for now; more cities as their data becomes available.",
+  },
   {
     id: "licenses",
     label: "🍷 Liquor licenses",
@@ -25,6 +31,30 @@ const SOURCES: { id: Source; label: string; blurb: string }[] = [
     blurb:
       "Businesses recently added to OpenStreetMap — offices, clinics, salons, gyms, shops. Volunteers add listings, so some appear weeks after opening.",
   },
+];
+
+const money = (v: unknown) =>
+  typeof v === "number" ? `$${v >= 1e6 ? `${(v / 1e6).toFixed(1)}M` : v >= 1e3 ? `${Math.round(v / 1e3)}K` : v}` : "";
+const hotSignal = (s: unknown) => /^(Move|Build)/.test(String(s));
+
+const permitCols: Column<Row>[] = [
+  { key: "Score", label: "Score", render: (r) => <ScoreBar value={Number(r.Score)} /> },
+  { key: "Opened", label: "Filed", className: "nowrap" },
+  { key: "Signal", label: "Signal", render: (r) => <span className={`tag ${hotSignal(r.Signal) ? "hot" : ""}`}>{String(r.Signal)}</span> },
+  { key: "Business", label: "Business", className: "name", render: (r) => (r.Business ? String(r.Business) : <span className="muted">See description</span>) },
+  { key: "Address", label: "Address", className: "nowrap", render: (r) => <ExtLink href={r.Map as string} label={String(r.Address)} /> },
+  { key: "Value", label: "Job value", className: "nowrap", render: (r) => money(r.Value) },
+  { key: "Status", label: "Status", className: "nowrap" },
+  {
+    key: "Description", label: "What they're doing", className: "wrap",
+    render: (r) => {
+      const d = String(r.Description);
+      return <span title={d}>{d.length > 160 ? `${d.slice(0, 160)}…` : d}</span>;
+    },
+  },
+  { key: "Contractor", label: "Contractor" },
+  { key: "Note", label: "Note", render: (r) => (r.Note ? <span className="tag">{String(r.Note)}</span> : null) },
+  { key: "Permit #", label: "Permit #", className: "nowrap" },
 ];
 
 const licenseCols: Column<Row>[] = [
@@ -64,18 +94,19 @@ const mapCols: Column<Row>[] = [
   { key: "Map", label: "Map", render: (r) => <ExtLink href={r.Map as string} label="View" /> },
 ];
 
-const DAYS: Record<Source, number[]> = { licenses: [90, 180, 365], news: [7, 14, 30, 60], map: [30, 60, 90, 180] };
-const DEFAULT_DAYS: Record<Source, number> = { licenses: 180, news: 30, map: 60 };
+const DAYS: Record<Source, number[]> = { permits: [30, 60, 90, 180, 365], licenses: [90, 180, 365], news: [7, 14, 30, 60], map: [30, 60, 90, 180] };
+const DEFAULT_DAYS: Record<Source, number> = { permits: 90, licenses: 180, news: 30, map: 60 };
 
 export default function TriggerLeads() {
   const [opts, setOpts] = useState<Options | null>(null);
   const [territory, setTerritory] = useState("");
   const [custom, setCustom] = useState("");
-  const [source, setSource] = useState<Source>("licenses");
+  const [source, setSource] = useState<Source>("permits");
   const [days, setDays] = useState<Record<Source, number>>(DEFAULT_DAYS);
   const [hideChains, setHideChains] = useState(true);
   const [rows, setRows] = useState<Row[] | null>(null);
   const [withContacts, setWithContacts] = useState(false);
+  const [notCovered, setNotCovered] = useState<string[]>([]);
   const [loading, setLoading] = useState<string>("");
   const [error, setError] = useState("");
 
@@ -96,7 +127,9 @@ export default function TriggerLeads() {
     setLoading(
       contacts
         ? "Matching public listings and reading business websites (1–2 minutes)…"
-        : source === "map"
+        : source === "permits"
+          ? "Reading the city's permit records…"
+          : source === "map"
           ? "Searching the map for newly added businesses (up to a minute)…"
           : source === "news"
             ? "Searching local news…"
@@ -106,9 +139,10 @@ export default function TriggerLeads() {
     try {
       const query = { cities, days: days[source], hide_chains: hideChains };
       const path =
-        source === "licenses" ? (contacts ? "/v1/leads/licenses/contacts" : "/v1/leads/licenses") : source === "news" ? "/v1/leads/news" : "/v1/leads/new-on-map";
-      const res = await api<{ leads: Row[] }>(path, { method: contacts ? "POST" : "GET", query });
+        source === "permits" ? "/v1/leads/permits" : source === "licenses" ? (contacts ? "/v1/leads/licenses/contacts" : "/v1/leads/licenses") : source === "news" ? "/v1/leads/news" : "/v1/leads/new-on-map";
+      const res = await api<{ leads: Row[]; not_covered?: string[] }>(path, { method: contacts ? "POST" : "GET", query });
       setRows(res.leads);
+      setNotCovered(res.not_covered ?? []);
       setWithContacts(contacts || source !== "licenses");
     } catch (e) {
       setError((e as Error).message);
@@ -184,15 +218,33 @@ export default function TriggerLeads() {
             {source === "licenses" && (
               <div className="stat"><b>{rows.filter((r) => String(r.Trigger).startsWith("Pending")).length}</b><span>Pending (opening / new owner)</span></div>
             )}
-            {source !== "news" && (
+            {source === "permits" && (
+              <div className="stat"><b>{rows.filter((r) => String(r.Signal).startsWith("Move")).length}</b><span>Move-ins (U&amp;O)</span></div>
+            )}
+            {source !== "news" && source !== "permits" && (
               <div className="stat"><b>{withContacts ? rows.filter((r) => r.Phone || r.Email).length : "—"}</b><span>With phone or email</span></div>
             )}
             {source === "news" && (
               <div className="stat"><b>{rows.filter((r) => r.Signal !== "Opening").length}</b><span>Leases &amp; moves</span></div>
             )}
           </div>
+          {source === "permits" && notCovered.length > 0 && (
+            <div className="notice info">
+              Permit data covers {cityList.filter((c) => !notCovered.includes(c)).join(", ") || "none of these cities"} so far. Not yet: {notCovered.join(", ")}.
+            </div>
+          )}
           {count === 0 ? (
             <div className="notice info">Nothing found for these cities. Try a longer look-back.</div>
+          ) : source === "permits" ? (
+            <LeadTable rows={rows} columns={permitCols} csvName="build_outs.csv"
+              rowId={(r) => `permit-${r["Permit #"]}`}
+              toPipeline={(r) => ({
+                name: String(r.Business || r.Address), category: String(r.Signal),
+                note: [
+                  `${r.Signal} filed ${r.Opened}`, `${r.Address}, ${r.City}`, r.Value ? `Job ${money(r.Value)}` : "",
+                  r.Contractor ? `Contractor: ${r.Contractor}` : "", `Permit ${r["Permit #"]}`, String(r.Description).slice(0, 300),
+                ].filter(Boolean).join(" · "),
+              })} />
           ) : source === "licenses" ? (
             <LeadTable rows={rows} columns={licenseCols} csvName="license_leads.csv"
               rowId={(r) => `abc-${r["ABC file #"]}`}

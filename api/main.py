@@ -8,6 +8,7 @@ GET  /v1/leads/licenses               pending / new liquor licenses (CA ABC dail
 POST /v1/leads/licenses/contacts      same list with phone / email / website looked up
 GET  /v1/leads/news                   local news about openings, leases and moves
 GET  /v1/leads/new-on-map             businesses newly added to OpenStreetMap
+GET  /v1/leads/permits                commercial build-out / move-in permits (Palo Alto so far)
 GET  /v1/discover                     businesses in an area by category, scored
 GET  /v1/pipeline · PUT/DELETE /v1/pipeline/{prospect_id}
 OpenAPI docs at /docs.
@@ -23,6 +24,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field
 
 import discover_core
+import permits
 import trigger_leads
 from api import pipeline as pipe
 from api.auth import User, current_user, get_settings
@@ -68,6 +70,16 @@ def overpass(query: str, mirrors=None) -> list[dict]:
         return trigger_leads.fetch_listings(requests, query, UA, mirrors=mirrors)
     except RuntimeError as exc:
         raise HTTPException(503, str(exc)) from exc
+
+
+def palo_alto_csv() -> str:
+    def compute():
+        try:
+            return permits.download_palo_alto(requests, UA)
+        except Exception as exc:
+            raise HTTPException(503, "Palo Alto's permit data isn't responding right now. Try again in a few minutes.") from exc
+
+    return cached("palo_alto_permits", 12 * 3600, compute)
 
 
 def news(cities: tuple[str, ...], days: int) -> list[dict]:
@@ -171,6 +183,20 @@ def new_on_map(cities: tuple[str, ...] = Depends(parse_cities), days: int = Quer
     rows = [r for r in cached(("newmap", cities, days), 12 * 3600, compute)
             if not (hide_chains and r.get("Note") == "Chain")]
     return {"cities": cities, "count": len(rows), "leads": rows}
+
+
+@app.get("/v1/leads/permits")
+def permit_leads(cities: tuple[str, ...] = Depends(parse_cities), days: int = Query(90, ge=14, le=365),
+                 hide_chains: bool = True, include_minor: bool = False,
+                 user: User = Depends(current_user)) -> dict:
+    covered = [c for c in cities if c in permits.COVERED_CITIES]
+    rows: list[dict] = []
+    if "Palo Alto" in covered:
+        rows = cached(("permits", "Palo Alto", days, include_minor), 12 * 3600,
+                      lambda: permits.parse_palo_alto(palo_alto_csv(), days=days, include_minor=include_minor))
+    rows = _chain_filter([dict(r) for r in rows], hide_chains, "Chain")
+    return {"cities": cities, "covered": covered, "not_covered": [c for c in cities if c not in covered],
+            "count": len(rows), "leads": rows}
 
 
 @app.get("/v1/discover")
